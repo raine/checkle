@@ -62,7 +62,7 @@ format-check:
     @checkle --label format-check --mode rustfmt -- cargo fmt --all -- --check
 
 cargo-deny:
-    @checkle --label cargo-deny --mode cargo-deny -- cargo deny check
+    @checkle --label cargo-deny --mode cargo-deny -- cargo deny --format json check
 
 cargo-machete:
     @checkle --label cargo-machete --mode cargo-machete -- cargo machete --with-metadata

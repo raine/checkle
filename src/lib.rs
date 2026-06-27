@@ -497,6 +497,11 @@ fn looks_like_cargo_machete_output(text: &str) -> bool {
 }
 
 fn cargo_deny_summary(text: &str) -> Vec<String> {
+    let structured = cargo_deny_json_summary(text);
+    if !structured.is_empty() {
+        return structured;
+    }
+
     grep_summary(
         text,
         80,
@@ -521,10 +526,76 @@ fn cargo_machete_summary(text: &str) -> Vec<String> {
         &[
             "Error:",
             "warning:",
-            "The following dependencies seem to be unused",
+            "cargo-machete found the following unused dependencies",
+            "cargo-machete didn't find any unused dependencies",
+            "\t",
             "  ",
         ],
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDenyDiagnostic {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    fields: Option<CargoDenyDiagnosticFields>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDenyDiagnosticFields {
+    severity: Option<String>,
+    message: Option<String>,
+    code: Option<String>,
+    #[serde(default)]
+    labels: Vec<CargoDenyLabel>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDenyLabel {
+    message: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+fn cargo_deny_json_summary(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<CargoDenyDiagnostic>(line).ok())
+        .filter(|diagnostic| diagnostic.kind.as_deref() == Some("diagnostic"))
+        .filter_map(|diagnostic| diagnostic.fields)
+        .flat_map(|fields| {
+            let mut lines = Vec::new();
+            let severity = fields.severity.unwrap_or_else(|| "diagnostic".to_string());
+            let message = fields.message.unwrap_or_default();
+            let mut heading = severity;
+            if let Some(code) = fields.code {
+                heading.push('[');
+                heading.push_str(&code);
+                heading.push(']');
+            }
+            if !message.is_empty() {
+                heading.push_str(": ");
+                heading.push_str(&message);
+            }
+            lines.push(heading);
+
+            for label in fields.labels.iter().take(4) {
+                if let Some(message) = &label.message {
+                    let location = match (label.line, label.column) {
+                        (Some(line), Some(column)) => format!("{line}:{column}: "),
+                        (Some(line), None) => format!("{line}: "),
+                        _ => String::new(),
+                    };
+                    lines.push(format!("  {location}{message}"));
+                }
+            }
+            for note in fields.notes.iter().take(4) {
+                lines.push(format!("  note: {note}"));
+            }
+            lines
+        })
+        .collect()
 }
 
 fn fallback_summary(text: &str) -> Vec<String> {
@@ -1041,6 +1112,22 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_cargo_deny_json_diagnostics() {
+        let input = r#"{"type":"diagnostic","fields":{"severity":"error","code":"bans","message":"duplicate crate","labels":[{"message":"crate-a v1","line":12,"column":5}],"notes":["only one version is allowed"]}}
+{"type":"log","fields":{"message":"done"}}
+"#;
+        let summary = summarize(Mode::CargoDeny, input.as_bytes());
+        assert_eq!(
+            summary.text_lines,
+            vec![
+                "error[bans]: duplicate crate",
+                "  12:5: crate-a v1",
+                "  note: only one version is allowed",
+            ]
+        );
+    }
+
+    #[test]
     fn auto_detects_supported_formats() {
         let cargo = r#"{"reason":"compiler-message","message":{"level":"error","message":"sample","spans":[],"children":[]}}"#;
         assert_eq!(summarize(Mode::Auto, cargo.as_bytes()).diagnostics.len(), 1);
@@ -1068,7 +1155,7 @@ mod tests {
         let machete = "The following dependencies seem to be unused:\n  anyhow\n";
         assert_eq!(
             summarize(Mode::Auto, machete.as_bytes()).text_lines,
-            vec!["The following dependencies seem to be unused:", "  anyhow"]
+            vec!["  anyhow"]
         );
     }
 
@@ -1114,13 +1201,6 @@ error: fallback duplicate
     fn summarizes_cargo_machete_findings() {
         let input = "noise\nThe following dependencies seem to be unused:\n  anyhow\n  serde\n";
         let summary = summarize(Mode::CargoMachete, input.as_bytes());
-        assert_eq!(
-            summary.text_lines,
-            vec![
-                "The following dependencies seem to be unused:",
-                "  anyhow",
-                "  serde"
-            ]
-        );
+        assert_eq!(summary.text_lines, vec!["  anyhow", "  serde"]);
     }
 }
