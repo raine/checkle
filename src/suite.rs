@@ -381,7 +381,7 @@ fn execute_specs_with_progress(
                     result,
                 });
                 if let Some(progress_bars) = &progress_bars {
-                    progress_bars.bars[index].finish_and_clear();
+                    finish_progress_bar(&progress_bars.bars[index], &statuses[index]);
                 }
                 remaining -= 1;
             }
@@ -399,9 +399,6 @@ fn execute_specs_with_progress(
         }
     }
     if let Some(progress_bars) = &progress_bars {
-        for bar in &progress_bars.bars {
-            bar.finish_and_clear();
-        }
         let _ = progress_bars.multi.clear();
     }
 
@@ -472,6 +469,15 @@ fn update_progress(
             bar.set_position(started[index].elapsed().as_secs());
             bar.tick();
         }
+    }
+}
+
+fn finish_progress_bar(bar: &ProgressBar, status: &Option<SuiteStatus>) {
+    match status.as_ref().map(|status| &status.result) {
+        Some(Ok(result)) if result.exit_code == 0 => bar.finish_with_message("✓"),
+        Some(Ok(_)) => bar.finish_with_message("✖"),
+        Some(Err(_)) => bar.finish_with_message("!"),
+        None => bar.finish_and_clear(),
     }
 }
 
