@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,8 +194,9 @@ fn limit_line(line: &str, max_chars: usize) -> String {
     trimmed
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Mode {
+    #[default]
     Auto,
     Cargo,
     Nextest,
@@ -216,6 +218,8 @@ pub fn run(options: RunOptions) -> Result<i32> {
     if options.command.is_empty() {
         bail!("command is required");
     }
+
+    validate_label(&options.label)?;
 
     let log_dir = Path::new(&options.log_dir);
     std::fs::create_dir_all(log_dir)
@@ -606,17 +610,22 @@ fn fallback_summary(text: &str) -> Vec<String> {
     )
 }
 
-fn safe_label(label: &str) -> String {
-    label
+pub fn validate_label(label: &str) -> Result<()> {
+    if label.is_empty() {
+        bail!("label cannot be empty");
+    }
+    if !label
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        bail!("label can only contain ASCII letters, digits, '_', '.', and '-'");
+    }
+    Ok(())
+}
+
+fn safe_label(label: &str) -> String {
+    validate_label(label).expect("label validated before log path construction");
+    label.to_string()
 }
 
 #[derive(Debug, Deserialize)]

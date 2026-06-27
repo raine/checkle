@@ -41,12 +41,16 @@ with the wrapped command's exit code and prints a compact summary:
 ```text
 full log: target/check-logs/clippy.log
 
-src/lib.rs:1:2 clippy::sample
+error: src/lib.rs:1:2 clippy::sample
   sample failure
   help: try sample fix
 ```
 
-The full raw output remains in the log file.
+The full raw output remains in the log file. Logs are written relative to the
+current directory unless `--log-dir` is absolute. Each log line is prefixed with
+`[stdout]` or `[stderr]` so stream identity is visible. Labels can contain ASCII
+letters, digits, `_`, `.`, and `-`; invalid labels fail rather than mapping to a
+colliding log filename.
 
 ## Justfile integration
 

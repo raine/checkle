@@ -100,6 +100,16 @@ fn cli_streams_log_before_command_exits() {
 }
 
 #[test]
+fn cli_rejects_invalid_labels() {
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .args(["--label", "bad label", "--", "sh", "-c", "exit 0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("label can only contain ASCII"));
+}
+
+#[test]
 fn cli_labels_stdout_and_stderr_in_log() {
     let dir = tempdir().unwrap();
     let log_dir = dir.path().join("logs");
