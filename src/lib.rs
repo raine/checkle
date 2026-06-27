@@ -17,7 +17,8 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestFailure {
     pub name: String,
-    pub output: Vec<String>,
+    pub stdout: Vec<String>,
+    pub stderr: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,10 +66,21 @@ impl Summary {
             output.push_str("failed: ");
             output.push_str(&failure.name);
             output.push('\n');
-            for line in &failure.output {
-                output.push_str("  ");
-                output.push_str(line);
-                output.push('\n');
+            if !failure.stdout.is_empty() {
+                output.push_str("  STDOUT\n");
+                for line in &failure.stdout {
+                    output.push_str("  ");
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            }
+            if !failure.stderr.is_empty() {
+                output.push_str("  STDERR\n");
+                for line in &failure.stderr {
+                    output.push_str("  ");
+                    output.push_str(line);
+                    output.push('\n');
+                }
             }
             output.push('\n');
         }
@@ -353,21 +365,34 @@ struct NextestEvent {
     event: Option<String>,
     name: Option<String>,
     stdout: Option<String>,
+    stderr: Option<String>,
 }
 
 fn nextest_failures(text: &str) -> Vec<TestFailure> {
-    text.lines()
+    let mut failures = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for event in text
+        .lines()
         .filter_map(|line| serde_json::from_str::<NextestEvent>(line).ok())
         .filter(|event| {
             event.kind.as_deref() == Some("test") && event.event.as_deref() == Some("failed")
         })
-        .filter_map(|event| {
-            Some(TestFailure {
-                name: event.name?,
-                output: recent_lines(event.stdout.as_deref().unwrap_or(""), 12),
-            })
-        })
-        .collect()
+    {
+        let Some(name) = event.name else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        failures.push(TestFailure {
+            name,
+            stdout: recent_lines(event.stdout.as_deref().unwrap_or(""), 12),
+            stderr: recent_lines(event.stderr.as_deref().unwrap_or(""), 12),
+        });
+    }
+
+    failures
 }
 
 fn nextest_text_summary(text: &str) -> Vec<String> {
@@ -553,13 +578,40 @@ mod tests {
 
     #[test]
     fn summarizes_nextest_json_failures() {
-        let input = r#"{"type":"test","event":"failed","name":"crate::test_name","stdout":"a\nb\nc"}
+        let input = r#"{"type":"test","event":"failed","name":"crate::test_name","stdout":"a\nb\nc","stderr":"panic\nbacktrace"}
 {"type":"suite","event":"failed"}
 "#;
         let summary = summarize(Mode::Nextest, input.as_bytes());
         assert_eq!(summary.test_failures.len(), 1);
         assert_eq!(summary.test_failures[0].name, "crate::test_name");
-        assert_eq!(summary.test_failures[0].output, vec!["a", "b", "c"]);
+        assert_eq!(summary.test_failures[0].stdout, vec!["a", "b", "c"]);
+        assert_eq!(summary.test_failures[0].stderr, vec!["panic", "backtrace"]);
+    }
+
+    #[test]
+    fn renders_nextest_stdout_and_stderr() {
+        let summary = Summary {
+            diagnostics: Vec::new(),
+            test_failures: vec![TestFailure {
+                name: "crate::test_name".to_string(),
+                stdout: vec!["stdout line".to_string()],
+                stderr: vec!["stderr line".to_string()],
+            }],
+            text_lines: Vec::new(),
+        };
+        let rendered = summary.render(Path::new("target/check-logs/test.log"));
+        assert!(rendered.contains("  STDOUT\n  stdout line"));
+        assert!(rendered.contains("  STDERR\n  stderr line"));
+    }
+
+    #[test]
+    fn deduplicates_nextest_json_failures() {
+        let input = r#"{"type":"test","event":"failed","name":"crate::test_name","stdout":"first"}
+{"type":"test","event":"failed","name":"crate::test_name","stdout":"second"}
+"#;
+        let summary = summarize(Mode::Nextest, input.as_bytes());
+        assert_eq!(summary.test_failures.len(), 1);
+        assert_eq!(summary.test_failures[0].stdout, vec!["first"]);
     }
 
     #[test]
