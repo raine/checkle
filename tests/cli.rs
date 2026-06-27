@@ -100,6 +100,41 @@ fn cli_streams_log_before_command_exits() {
 }
 
 #[test]
+fn cli_run_lists_available_checks() {
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .args(["run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("available checks:"))
+        .stderr(predicate::str::contains("clippy"))
+        .stderr(predicate::str::contains("test"));
+}
+
+#[test]
+fn cli_run_rejects_unknown_checks() {
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .args(["run", "wat"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown check: wat"));
+}
+
+#[test]
+fn cli_run_accepts_log_dir_after_subcommand() {
+    let dir = tempdir().unwrap();
+    let log_dir = dir.path().join("logs");
+
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .args(["run", "--log-dir", log_dir.to_str().unwrap(), "wat"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown check: wat"));
+}
+
+#[test]
 fn cli_rejects_invalid_labels() {
     Command::cargo_bin("checkle")
         .unwrap()

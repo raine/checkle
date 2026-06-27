@@ -52,24 +52,35 @@ current directory unless `--log-dir` is absolute. Each log line is prefixed with
 letters, digits, `_`, `.`, and `-`; invalid labels fail rather than mapping to a
 colliding log filename.
 
+## Project checks
+
+Run named Rust project checks in parallel:
+
+```sh
+checkle run format-check clippy test static-analysis
+```
+
+With no check names, `checkle run` lists available checks. The built-in checks are:
+
+- `format-check`: `cargo fmt --all -- --check`
+- `clippy`: `cargo clippy --message-format=json --all-targets --locked -- -D warnings`
+- `test`: `cargo test --locked --message-format=json`
+- `cargo-deny`: `cargo deny --format json check`
+- `cargo-machete`: `cargo machete --with-metadata`
+
+The `static-analysis` group runs `cargo-deny` and `cargo-machete` when those tools are installed. The `all` group runs `format-check`, `clippy`, `test`, and the installed static-analysis checks. Explicit `cargo-deny` and `cargo-machete` requests require their tools to be installed.
+
 ## Justfile integration
 
 ```just
-clippy:
-    @checkle --label clippy --mode cargo -- cargo clippy --message-format=json --all-targets -- -D warnings -D clippy::all
+check:
+    checkle run all
+```
 
-test:
-    @checkle --label test --mode nextest -- env SQLX_OFFLINE=true cargo nextest run --all-targets --locked --no-fail-fast --status-level fail
-    @checkle --label doc-test --mode cargo -- env SQLX_OFFLINE=true cargo test --doc --message-format=json --locked
+Use the wrapper form for project-specific commands:
 
-format-check:
-    @checkle --label format-check --mode rustfmt -- cargo fmt --all -- --check
-
-cargo-deny:
-    @checkle --label cargo-deny --mode cargo-deny -- cargo deny --format json check
-
-cargo-machete:
-    @checkle --label cargo-machete --mode cargo-machete -- cargo machete --with-metadata
+```sh
+checkle --label doc-test --mode cargo -- cargo test --doc --message-format=json --locked
 ```
 
 Use `--mode auto` for unknown checks. Specific modes produce better summaries.

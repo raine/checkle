@@ -1,7 +1,7 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
 
-use checkle::{Mode, RunOptions, SummaryLimits};
+use checkle::{Mode, RunOptions, SuiteOptions, SummaryLimits};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -9,13 +9,16 @@ use checkle::{Mode, RunOptions, SummaryLimits};
     about = "Run checks with compact, agent-friendly failure output"
 )]
 struct Cli {
+    #[command(subcommand)]
+    action: Option<Action>,
+
     #[arg(long, default_value = "check")]
     label: String,
 
     #[arg(long, value_enum, default_value_t = Mode::default())]
     mode: Mode,
 
-    #[arg(long, default_value = "target/check-logs")]
+    #[arg(long, default_value = "target/check-logs", global = true)]
     log_dir: String,
 
     #[arg(long, default_value_t = 20)]
@@ -33,24 +36,48 @@ struct Cli {
     #[arg(long, default_value_t = 80)]
     tail: usize,
 
-    #[arg(required = true, trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Action {
+    Run {
+        #[arg(value_name = "CHECK")]
+        checks: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let code = checkle::run(RunOptions {
-        label: cli.label,
-        mode: cli.mode,
-        log_dir: cli.log_dir,
-        limits: SummaryLimits {
-            max_diagnostics: cli.max_diagnostics,
-            max_failures: cli.max_failures,
-            max_lines: cli.max_lines,
-            max_line_chars: cli.max_line_chars,
-            max_fallback_lines: cli.tail,
-        },
-        command: cli.command,
-    })?;
+    let limits = SummaryLimits {
+        max_diagnostics: cli.max_diagnostics,
+        max_failures: cli.max_failures,
+        max_lines: cli.max_lines,
+        max_line_chars: cli.max_line_chars,
+        max_fallback_lines: cli.tail,
+    };
+    let code = match cli.action {
+        Some(Action::Run { checks }) => checkle::run_suite(SuiteOptions {
+            checks,
+            log_dir: cli.log_dir,
+            limits,
+        })?,
+        None => {
+            if cli.command.is_empty() {
+                Cli::command().print_help()?;
+                eprintln!();
+                2
+            } else {
+                checkle::run(RunOptions {
+                    label: cli.label,
+                    mode: cli.mode,
+                    log_dir: cli.log_dir,
+                    limits,
+                    command: cli.command,
+                })?
+            }
+        }
+    };
     std::process::exit(code);
 }

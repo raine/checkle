@@ -1,3 +1,5 @@
+mod suite;
+
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -9,6 +11,11 @@ use std::thread;
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::Deserialize;
+
+pub use suite::{
+    ResolvedChecks, RunSpec, SkippedCheck, SuiteOptions, SuiteStatus, SuiteSummary, execute_specs,
+    list_checks, resolve_checks, run_suite, tool_installed,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -222,6 +229,10 @@ pub struct RunResult {
 }
 
 pub fn run(options: RunOptions) -> Result<i32> {
+    if options.command.is_empty() {
+        bail!("command is required");
+    }
+
     let result = execute_check(&options)?;
     if result.exit_code == 0 {
         return Ok(0);
