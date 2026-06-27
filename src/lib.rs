@@ -7,10 +7,11 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
+    pub severity: String,
     pub location: Option<String>,
     pub code: Option<String>,
     pub message: String,
-    pub help: Option<String>,
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,25 +36,26 @@ impl Summary {
         let mut output = format!("full log: {}\n\n", log_path.display());
 
         for diagnostic in &self.diagnostics {
+            output.push_str(&diagnostic.severity);
+            output.push_str(": ");
             if let Some(location) = &diagnostic.location {
                 output.push_str(location);
                 if let Some(code) = &diagnostic.code {
                     output.push(' ');
                     output.push_str(code);
                 }
-                output.push('\n');
             } else if let Some(code) = &diagnostic.code {
                 output.push_str(code);
-                output.push('\n');
             } else {
-                output.push_str("diagnostic\n");
+                output.push_str("diagnostic");
             }
+            output.push('\n');
             output.push_str("  ");
             output.push_str(&diagnostic.message);
             output.push('\n');
-            if let Some(help) = &diagnostic.help {
-                output.push_str("  help: ");
-                output.push_str(help);
+            for detail in &diagnostic.details {
+                output.push_str("  ");
+                output.push_str(detail);
                 output.push('\n');
             }
             output.push('\n');
@@ -149,9 +151,13 @@ pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {
         summary.diagnostics.extend(cargo_diagnostics(text.as_ref()));
     }
     if matches!(mode, Mode::Auto | Mode::Nextest) {
-        summary.test_failures.extend(nextest_failures(text.as_ref()));
+        summary
+            .test_failures
+            .extend(nextest_failures(text.as_ref()));
         if summary.test_failures.is_empty() {
-            summary.text_lines.extend(nextest_text_summary(text.as_ref()));
+            summary
+                .text_lines
+                .extend(nextest_text_summary(text.as_ref()));
         }
     }
     if matches!(mode, Mode::Rustfmt) {
@@ -161,14 +167,29 @@ pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {
         summary.text_lines.extend(grep_summary(
             text.as_ref(),
             80,
-            &["error[", "warning[", "advisories", "bans", "licenses", "sources", "    ├", "    └", "    │"],
+            &[
+                "error[",
+                "warning[",
+                "advisories",
+                "bans",
+                "licenses",
+                "sources",
+                "    ├",
+                "    └",
+                "    │",
+            ],
         ));
     }
     if matches!(mode, Mode::CargoMachete) {
         summary.text_lines.extend(grep_summary(
             text.as_ref(),
             80,
-            &["Error:", "warning:", "The following dependencies seem to be unused", "  "],
+            &[
+                "Error:",
+                "warning:",
+                "The following dependencies seem to be unused",
+                "  ",
+            ],
         ));
     }
     if matches!(mode, Mode::Auto)
@@ -189,7 +210,13 @@ pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {
 fn safe_label(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -204,8 +231,11 @@ struct CargoMessage {
     level: String,
     message: String,
     code: Option<CargoCode>,
+    #[serde(default)]
     spans: Vec<CargoSpan>,
+    #[serde(default)]
     children: Vec<CargoChild>,
+    rendered: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,12 +249,15 @@ struct CargoSpan {
     line_start: usize,
     column_start: usize,
     is_primary: bool,
+    label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CargoChild {
     level: String,
     message: String,
+    #[serde(default)]
+    spans: Vec<CargoSpan>,
 }
 
 fn cargo_diagnostics(text: &str) -> Vec<Diagnostic> {
@@ -232,7 +265,7 @@ fn cargo_diagnostics(text: &str) -> Vec<Diagnostic> {
         .filter_map(|line| serde_json::from_str::<CargoEvent>(line).ok())
         .filter(|event| event.reason.as_deref() == Some("compiler-message"))
         .filter_map(|event| event.message)
-        .filter(|message| message.level == "error")
+        .filter(|message| matches!(message.level.as_str(), "error" | "warning"))
         .map(|message| {
             let span = message
                 .spans
@@ -240,19 +273,77 @@ fn cargo_diagnostics(text: &str) -> Vec<Diagnostic> {
                 .find(|span| span.is_primary)
                 .cloned()
                 .or_else(|| message.spans.first().cloned());
-            let help = message
-                .children
-                .iter()
-                .find(|child| child.level == "help" && !child.message.is_empty())
-                .map(|child| child.message.clone());
+            let mut details = diagnostic_details(&message);
+            if let Some(rendered) = &message.rendered {
+                append_rendered_details(&mut details, rendered);
+            }
             Diagnostic {
-                location: span.map(|span| format!("{}:{}:{}", span.file_name, span.line_start, span.column_start)),
+                severity: message.level,
+                location: span.map(|span| {
+                    format!(
+                        "{}:{}:{}",
+                        span.file_name, span.line_start, span.column_start
+                    )
+                }),
                 code: message.code.map(|code| code.code),
                 message: message.message,
-                help,
+                details,
             }
         })
         .collect()
+}
+
+fn diagnostic_details(message: &CargoMessage) -> Vec<String> {
+    let mut details = Vec::new();
+    for span in message.spans.iter().filter(|span| !span.is_primary).take(4) {
+        if let Some(label) = &span.label {
+            if !label.is_empty() {
+                details.push(format!(
+                    "{}:{}:{}: {}",
+                    span.file_name, span.line_start, span.column_start, label
+                ));
+            }
+        }
+    }
+    for child in message.children.iter().take(6) {
+        if !child.message.is_empty()
+            && matches!(child.level.as_str(), "help" | "note" | "warning" | "error")
+        {
+            details.push(format!("{}: {}", child.level, child.message));
+        }
+        for span in child.spans.iter().filter(|span| !span.is_primary).take(2) {
+            if let Some(label) = &span.label {
+                if !label.is_empty() {
+                    details.push(format!(
+                        "{}:{}:{}: {}",
+                        span.file_name, span.line_start, span.column_start, label
+                    ));
+                }
+            }
+        }
+    }
+    tail(details, 12)
+}
+
+fn append_rendered_details(details: &mut Vec<String>, rendered: &str) {
+    let mut rendered_lines: Vec<String> = rendered
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty()
+                && (trimmed.starts_with("= note:")
+                    || trimmed.starts_with("= help:")
+                    || trimmed.starts_with("help:")
+                    || trimmed.starts_with("note:"))
+        })
+        .take(6)
+        .map(ToOwned::to_owned)
+        .collect();
+    details.append(&mut rendered_lines);
+    if details.len() > 12 {
+        *details = tail(std::mem::take(details), 12);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,7 +358,9 @@ struct NextestEvent {
 fn nextest_failures(text: &str) -> Vec<TestFailure> {
     text.lines()
         .filter_map(|line| serde_json::from_str::<NextestEvent>(line).ok())
-        .filter(|event| event.kind.as_deref() == Some("test") && event.event.as_deref() == Some("failed"))
+        .filter(|event| {
+            event.kind.as_deref() == Some("test") && event.event.as_deref() == Some("failed")
+        })
         .filter_map(|event| {
             Some(TestFailure {
                 name: event.name?,
@@ -324,7 +417,10 @@ fn rustfmt_summary(text: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut remaining = 0;
     for line in text.lines() {
-        if line.starts_with("Diff in") || line.starts_with("Error writing files") || line.starts_with("error:") {
+        if line.starts_with("Diff in")
+            || line.starts_with("Error writing files")
+            || line.starts_with("error:")
+        {
             remaining = 20;
             lines.push(line.to_string());
             continue;
@@ -352,7 +448,13 @@ fn recent_text(bytes: &[u8], limit: usize) -> String {
 }
 
 fn recent_lines(text: &str, limit: usize) -> Vec<String> {
-    tail(text.lines().filter(|line| !line.is_empty()).map(ToOwned::to_owned).collect(), limit)
+    tail(
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        limit,
+    )
 }
 
 fn tail<T>(items: Vec<T>, limit: usize) -> Vec<T> {
@@ -373,14 +475,80 @@ mod tests {
     #[test]
     fn summarizes_cargo_json_diagnostics() {
         let input = r#"not json
-{"reason":"compiler-message","message":{"level":"error","message":"sample failure","code":{"code":"clippy::sample"},"spans":[{"file_name":"src/lib.rs","line_start":1,"column_start":2,"is_primary":true}],"children":[{"level":"help","message":"try sample fix"}]}}
+{"reason":"compiler-message","message":{"level":"error","message":"sample failure","code":{"code":"clippy::sample"},"spans":[{"file_name":"src/lib.rs","line_start":1,"column_start":2,"is_primary":true}],"children":[{"level":"help","message":"try sample fix","spans":[]}]}}
 {"reason":"compiler-artifact"}
 "#;
         let summary = summarize(Mode::Cargo, input.as_bytes());
         assert_eq!(summary.diagnostics.len(), 1);
-        assert_eq!(summary.diagnostics[0].location.as_deref(), Some("src/lib.rs:1:2"));
-        assert_eq!(summary.diagnostics[0].code.as_deref(), Some("clippy::sample"));
-        assert_eq!(summary.diagnostics[0].help.as_deref(), Some("try sample fix"));
+        assert_eq!(summary.diagnostics[0].severity, "error");
+        assert_eq!(
+            summary.diagnostics[0].location.as_deref(),
+            Some("src/lib.rs:1:2")
+        );
+        assert_eq!(
+            summary.diagnostics[0].code.as_deref(),
+            Some("clippy::sample")
+        );
+        assert_eq!(summary.diagnostics[0].details, vec!["help: try sample fix"]);
+    }
+
+    #[test]
+    fn summarizes_cargo_warnings_and_context() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"warning","message":"lint failure","code":{"code":"clippy::dbg_macro"},"spans":[{"file_name":"src/lib.rs","line_start":3,"column_start":4,"is_primary":true,"label":"primary label"},{"file_name":"src/lib.rs","line_start":8,"column_start":9,"is_primary":false,"label":"secondary label"}],"children":[{"level":"help","message":"remove dbg","spans":[]},{"level":"note","message":"lint comes from command line","spans":[{"file_name":"src/main.rs","line_start":1,"column_start":1,"is_primary":false,"label":"note span"}]}],"rendered":"warning: lint failure\n  = note: rendered note\n  = help: rendered help\n"}}"#;
+        let summary = summarize(Mode::Cargo, input.as_bytes());
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert_eq!(summary.diagnostics[0].severity, "warning");
+        assert_eq!(
+            summary.diagnostics[0].location.as_deref(),
+            Some("src/lib.rs:3:4")
+        );
+        assert_eq!(
+            summary.diagnostics[0].code.as_deref(),
+            Some("clippy::dbg_macro")
+        );
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"src/lib.rs:8:9: secondary label".to_string())
+        );
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"help: remove dbg".to_string())
+        );
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"note: lint comes from command line".to_string())
+        );
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"src/main.rs:1:1: note span".to_string())
+        );
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"  = note: rendered note".to_string())
+        );
+    }
+
+    #[test]
+    fn renders_diagnostic_severity() {
+        let summary = Summary {
+            diagnostics: vec![Diagnostic {
+                severity: "warning".to_string(),
+                location: Some("src/lib.rs:1:2".to_string()),
+                code: Some("clippy::sample".to_string()),
+                message: "sample failure".to_string(),
+                details: vec!["help: try sample fix".to_string()],
+            }],
+            test_failures: Vec::new(),
+            text_lines: Vec::new(),
+        };
+        let rendered = summary.render(Path::new("target/check-logs/clippy.log"));
+        assert!(rendered.contains("warning: src/lib.rs:1:2 clippy::sample"));
+        assert!(rendered.contains("  help: try sample fix"));
     }
 
     #[test]
@@ -400,14 +568,22 @@ mod tests {
         let summary = summarize(Mode::Nextest, input.as_bytes());
         assert!(summary.text_lines.iter().any(|line| line.contains("FAIL")));
         assert!(summary.text_lines.iter().any(|line| line == "  line1"));
-        assert!(summary.text_lines.iter().any(|line| line.starts_with("Summary")));
+        assert!(
+            summary
+                .text_lines
+                .iter()
+                .any(|line| line.starts_with("Summary"))
+        );
     }
 
     #[test]
     fn summarizes_rustfmt_diffs() {
         let input = "noise\nDiff in /tmp/example.rs:1:\n- bad\n+ good\n";
         let summary = summarize(Mode::Rustfmt, input.as_bytes());
-        assert_eq!(summary.text_lines, vec!["Diff in /tmp/example.rs:1:", "- bad", "+ good"]);
+        assert_eq!(
+            summary.text_lines,
+            vec!["Diff in /tmp/example.rs:1:", "- bad", "+ good"]
+        );
     }
 
     #[test]
@@ -431,7 +607,11 @@ mod tests {
         let summary = summarize(Mode::CargoMachete, input.as_bytes());
         assert_eq!(
             summary.text_lines,
-            vec!["The following dependencies seem to be unused:", "  anyhow", "  serde"]
+            vec![
+                "The following dependencies seem to be unused:",
+                "  anyhow",
+                "  serde"
+            ]
         );
     }
 }

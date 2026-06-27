@@ -24,7 +24,9 @@ fn cli_writes_log_and_prints_compact_cargo_summary() {
         ])
         .assert()
         .code(7)
-        .stderr(predicate::str::contains("src/lib.rs:1:2 clippy::sample"))
+        .stderr(predicate::str::contains(
+            "error: src/lib.rs:1:2 clippy::sample",
+        ))
         .stderr(predicate::str::contains("sample failure"))
         .stderr(predicate::str::contains("help: try sample fix"));
 
