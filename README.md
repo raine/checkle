@@ -1,10 +1,10 @@
 # checkle
 
 `checkle` runs project checks and prints compact, agent-friendly failure output.
-It keeps the full command output in `target/check-logs` and shows only the
-useful diagnostics in the terminal.
+Full command output stays in `target/check-logs`, while terminal output focuses on
+useful diagnostics.
 
-The first target is Rust project checks:
+It understands Rust check output from:
 
 - Cargo JSON compiler diagnostics, including clippy and doctests
 - nextest failures, with JSON support and human-output fallback
@@ -14,21 +14,15 @@ The first target is Rust project checks:
 
 ## Install
 
-From this repository:
+Install from crates.io:
 
 ```sh
-cargo install --path .
-```
-
-From a checked-out copy in `~/code/checkle`:
-
-```sh
-cargo install --path ~/code/checkle
+cargo install checkle --locked
 ```
 
 ## Usage
 
-Run a command through `checkle`:
+Wrap any command with a label and output mode:
 
 ```sh
 checkle --label clippy --mode cargo -- \
@@ -46,10 +40,10 @@ error: src/lib.rs:1:2 clippy::sample
   help: try sample fix
 ```
 
-The full raw output remains in the log file. Logs are written relative to the
-current directory unless `--log-dir` is absolute. Each log line is prefixed with
+The raw output stays in the log file. Logs are written relative to the current
+directory unless `--log-dir` is absolute. Each log line is prefixed with
 `[stdout]` or `[stderr]` so stream identity is visible. Labels can contain ASCII
-letters, digits, `_`, `.`, and `-`; invalid labels fail rather than mapping to a
+letters, digits, `_`, `.`, and `-`. Invalid labels fail rather than mapping to a
 colliding log filename.
 
 ## Project checks
@@ -60,7 +54,8 @@ Run named Rust project checks in parallel:
 checkle run format-check clippy test static-analysis
 ```
 
-With no check names, `checkle run` lists available checks. The built-in checks are:
+With no check names, `checkle run` lists available checks. The built-in checks
+are:
 
 - `format-check`: `cargo fmt --all -- --check`
 - `clippy`: `cargo clippy --message-format=json --all-targets --locked -- -D warnings`
@@ -68,16 +63,14 @@ With no check names, `checkle run` lists available checks. The built-in checks a
 - `cargo-deny`: `cargo deny --format json check`
 - `cargo-machete`: `cargo machete --with-metadata`
 
-The `static-analysis` group runs `cargo-deny` and `cargo-machete` when those tools are installed. The `all` group runs `format-check`, `clippy`, `test`, and the installed static-analysis checks. Explicit `cargo-deny` and `cargo-machete` requests require their tools to be installed.
+The `static-analysis` group runs `cargo-deny` and `cargo-machete` when those
+tools are installed. The `all` group runs `format-check`, `clippy`, `test`, and
+the installed static-analysis checks. Explicit `cargo-deny` and `cargo-machete`
+requests require their tools to be installed.
 
-## Justfile integration
+## Configuration
 
-```just
-check:
-    checkle run all
-```
-
-Define project-specific checks in `checkle.toml`:
+Define project-specific checks and groups in `checkle.toml`:
 
 ```toml
 [[check]]
@@ -90,13 +83,14 @@ name = "all"
 checks = ["format-check", "clippy", "test", "doc-test", "static-analysis"]
 ```
 
-Use the wrapper form for one-off project-specific commands:
-
-```sh
-checkle --label doc-test --mode cargo -- cargo test --doc --message-format=json --locked
-```
-
 Use `--mode auto` for unknown checks. Specific modes produce better summaries.
+
+## Justfile integration
+
+```just
+check:
+    checkle run all
+```
 
 ## Pre-commit hook
 
@@ -106,7 +100,11 @@ Format staged Rust files and run the project check group:
 checkle pre-commit
 ```
 
-`checkle pre-commit` formats staged `*.rs` files in the Git index, mirrors formatted output back to worktree files that had no unstaged edits, skips documentation and media-only commits, hides unstaged changes while checks run, and restores them afterward. It runs the configured `all` group by default. Pass check names to run a different set:
+`checkle pre-commit` formats staged `*.rs` files in the Git index, mirrors
+formatted output back to worktree files that had no unstaged edits, skips
+documentation and media-only commits, hides unstaged changes while checks run,
+and restores them afterward. It runs the configured `all` group by default. Pass
+check names to run a different set:
 
 ```sh
 checkle pre-commit format-check clippy
@@ -118,7 +116,8 @@ Use the formatter without running checks:
 checkle format-staged
 ```
 
-Install it as a hook with a shim in `.git/hooks/pre-commit` or the repository hook path:
+Install it as a hook with a shim in `.git/hooks/pre-commit` or the repository
+hook path:
 
 ```sh
 #!/bin/sh
@@ -144,6 +143,6 @@ The self-check recipe installs the local binary and writes full logs under
 
 ## Agent guidance
 
-Agents should use project `just` recipes that wrap checks through `checkle`.
-Raw commands like `cargo clippy --message-format=json` print large JSON streams
-and are intended for `checkle` to parse, not for direct agent output.
+Agents should use project `just` recipes that wrap checks through `checkle`. Raw
+commands like `cargo clippy --message-format=json` print large JSON streams and
+are intended for `checkle` to parse, not for direct agent output.
