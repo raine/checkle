@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 
-use checkle::{Mode, RunOptions};
+use checkle::{Mode, RunOptions, SummaryLimits};
 
 #[derive(Debug, Parser)]
 #[command(about = "Run checks with compact, agent-friendly failure output")]
@@ -14,6 +14,21 @@ struct Cli {
 
     #[arg(long, default_value = "target/check-logs")]
     log_dir: String,
+
+    #[arg(long, default_value_t = 20)]
+    max_diagnostics: usize,
+
+    #[arg(long, default_value_t = 20)]
+    max_failures: usize,
+
+    #[arg(long, default_value_t = 12)]
+    max_lines: usize,
+
+    #[arg(long, default_value_t = 240)]
+    max_line_chars: usize,
+
+    #[arg(long, default_value_t = 80)]
+    tail: usize,
 
     #[arg(required = true, trailing_var_arg = true)]
     command: Vec<String>,
@@ -48,6 +63,13 @@ fn main() -> Result<()> {
         label: cli.label,
         mode: cli.mode.into(),
         log_dir: cli.log_dir,
+        limits: SummaryLimits {
+            max_diagnostics: cli.max_diagnostics,
+            max_failures: cli.max_failures,
+            max_lines: cli.max_lines,
+            max_line_chars: cli.max_line_chars,
+            max_fallback_lines: cli.tail,
+        },
         command: cli.command,
     })?;
     std::process::exit(code);

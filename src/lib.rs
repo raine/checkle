@@ -34,64 +34,159 @@ impl Summary {
     }
 
     pub fn render(&self, log_path: &Path) -> String {
+        self.render_with_limits(log_path, &SummaryLimits::default())
+    }
+
+    pub fn render_with_limits(&self, log_path: &Path, limits: &SummaryLimits) -> String {
         let mut output = format!("full log: {}\n\n", log_path.display());
 
-        for diagnostic in &self.diagnostics {
-            output.push_str(&diagnostic.severity);
-            output.push_str(": ");
+        let rendered_diagnostics = self.diagnostics.iter().take(limits.max_diagnostics);
+        for diagnostic in rendered_diagnostics {
+            let mut heading = format!("{}: ", diagnostic.severity);
             if let Some(location) = &diagnostic.location {
-                output.push_str(location);
+                heading.push_str(location);
                 if let Some(code) = &diagnostic.code {
-                    output.push(' ');
-                    output.push_str(code);
+                    heading.push(' ');
+                    heading.push_str(code);
                 }
             } else if let Some(code) = &diagnostic.code {
-                output.push_str(code);
+                heading.push_str(code);
             } else {
-                output.push_str("diagnostic");
+                heading.push_str("diagnostic");
             }
-            output.push('\n');
-            output.push_str("  ");
-            output.push_str(&diagnostic.message);
-            output.push('\n');
-            for detail in &diagnostic.details {
-                output.push_str("  ");
-                output.push_str(detail);
-                output.push('\n');
+            push_limited_line(&mut output, &heading, limits.max_line_chars);
+            push_limited_line(
+                &mut output,
+                &format!("  {}", diagnostic.message),
+                limits.max_line_chars,
+            );
+            for detail in diagnostic.details.iter().take(limits.max_lines) {
+                push_limited_line(&mut output, &format!("  {detail}"), limits.max_line_chars);
             }
-            output.push('\n');
-        }
-
-        for failure in &self.test_failures {
-            output.push_str("failed: ");
-            output.push_str(&failure.name);
-            output.push('\n');
-            if !failure.stdout.is_empty() {
-                output.push_str("  STDOUT\n");
-                for line in &failure.stdout {
-                    output.push_str("  ");
-                    output.push_str(line);
-                    output.push('\n');
-                }
-            }
-            if !failure.stderr.is_empty() {
-                output.push_str("  STDERR\n");
-                for line in &failure.stderr {
-                    output.push_str("  ");
-                    output.push_str(line);
-                    output.push('\n');
-                }
+            if diagnostic.details.len() > limits.max_lines {
+                push_limited_line(
+                    &mut output,
+                    &format!(
+                        "  omitted {} diagnostic detail lines; see full log above",
+                        diagnostic.details.len() - limits.max_lines
+                    ),
+                    limits.max_line_chars,
+                );
             }
             output.push('\n');
         }
-
-        for line in &self.text_lines {
-            output.push_str(line);
+        if self.diagnostics.len() > limits.max_diagnostics {
+            push_limited_line(
+                &mut output,
+                &format!(
+                    "omitted {} diagnostics; see full log above",
+                    self.diagnostics.len() - limits.max_diagnostics
+                ),
+                limits.max_line_chars,
+            );
             output.push('\n');
+        }
+
+        for failure in self.test_failures.iter().take(limits.max_failures) {
+            push_limited_line(
+                &mut output,
+                &format!("failed: {}", failure.name),
+                limits.max_line_chars,
+            );
+            render_stream(&mut output, "STDOUT", &failure.stdout, limits);
+            render_stream(&mut output, "STDERR", &failure.stderr, limits);
+            output.push('\n');
+        }
+        if self.test_failures.len() > limits.max_failures {
+            push_limited_line(
+                &mut output,
+                &format!(
+                    "omitted {} failed tests; see full log above",
+                    self.test_failures.len() - limits.max_failures
+                ),
+                limits.max_line_chars,
+            );
+            output.push('\n');
+        }
+
+        for line in self.text_lines.iter().take(limits.max_fallback_lines) {
+            push_limited_line(&mut output, line, limits.max_line_chars);
+        }
+        if self.text_lines.len() > limits.max_fallback_lines {
+            push_limited_line(
+                &mut output,
+                &format!(
+                    "omitted {} fallback lines; see full log above",
+                    self.text_lines.len() - limits.max_fallback_lines
+                ),
+                limits.max_line_chars,
+            );
         }
 
         output
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryLimits {
+    pub max_diagnostics: usize,
+    pub max_failures: usize,
+    pub max_lines: usize,
+    pub max_line_chars: usize,
+    pub max_fallback_lines: usize,
+}
+
+impl Default for SummaryLimits {
+    fn default() -> Self {
+        Self {
+            max_diagnostics: 20,
+            max_failures: 20,
+            max_lines: 12,
+            max_line_chars: 240,
+            max_fallback_lines: 80,
+        }
+    }
+}
+
+fn render_stream(output: &mut String, label: &str, lines: &[String], limits: &SummaryLimits) {
+    if lines.is_empty() {
+        return;
+    }
+    output.push_str("  ");
+    output.push_str(label);
+    output.push('\n');
+    for line in lines.iter().take(limits.max_lines) {
+        push_limited_line(output, &format!("  {line}"), limits.max_line_chars);
+    }
+    if lines.len() > limits.max_lines {
+        push_limited_line(
+            output,
+            &format!(
+                "  omitted {} {} lines; see full log above",
+                lines.len() - limits.max_lines,
+                label.to_ascii_lowercase()
+            ),
+            limits.max_line_chars,
+        );
+    }
+}
+
+fn push_limited_line(output: &mut String, line: &str, max_chars: usize) {
+    output.push_str(&limit_line(line, max_chars));
+    output.push('\n');
+}
+
+fn limit_line(line: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if line.chars().count() <= max_chars {
+        return line.to_string();
+    }
+    let keep = max_chars.saturating_sub(14);
+    let mut trimmed: String = line.chars().take(keep).collect();
+    trimmed.push_str("... truncated");
+    trimmed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +204,7 @@ pub struct RunOptions {
     pub label: String,
     pub mode: Mode,
     pub log_dir: String,
+    pub limits: SummaryLimits,
     pub command: Vec<String>,
 }
 
@@ -145,7 +241,7 @@ pub fn run(options: RunOptions) -> Result<i32> {
         eprintln!("no compact diagnostics found; showing recent log output:\n");
         eprint!("{}", recent_text(&combined, 80));
     } else {
-        eprint!("{}", summary.render(&log_path));
+        eprint!("{}", summary.render_with_limits(&log_path, &options.limits));
     }
 
     Ok(status)
@@ -699,6 +795,44 @@ mod tests {
     }
 
     #[test]
+    fn truncates_cargo_diagnostics() {
+        let summary = Summary {
+            diagnostics: vec![
+                Diagnostic {
+                    severity: "error".to_string(),
+                    location: Some("src/lib.rs:1:1".to_string()),
+                    code: None,
+                    message: "first diagnostic message with many characters".to_string(),
+                    details: vec!["detail 1".to_string(), "detail 2".to_string()],
+                },
+                Diagnostic {
+                    severity: "error".to_string(),
+                    location: Some("src/lib.rs:2:1".to_string()),
+                    code: None,
+                    message: "second".to_string(),
+                    details: Vec::new(),
+                },
+            ],
+            test_failures: Vec::new(),
+            text_lines: Vec::new(),
+        };
+        let rendered = summary.render_with_limits(
+            Path::new("target/check-logs/clippy.log"),
+            &SummaryLimits {
+                max_diagnostics: 1,
+                max_failures: 20,
+                max_lines: 1,
+                max_line_chars: 50,
+                max_fallback_lines: 80,
+            },
+        );
+        assert!(rendered.contains("... truncated"));
+        assert!(rendered.contains("omitted 1 diagnostic detail"));
+        assert!(rendered.contains("omitted 1 diagnostics"));
+        assert!(rendered.contains("full log: target/check-logs/clippy.log"));
+    }
+
+    #[test]
     fn summarizes_nextest_json_failures() {
         let input = r#"{"type":"test","event":"failed","name":"crate::test_name","stdout":"a\nb\nc","stderr":"panic\nbacktrace"}
 {"type":"suite","event":"failed"}
@@ -724,6 +858,39 @@ mod tests {
         let rendered = summary.render(Path::new("target/check-logs/test.log"));
         assert!(rendered.contains("  STDOUT\n  stdout line"));
         assert!(rendered.contains("  STDERR\n  stderr line"));
+    }
+
+    #[test]
+    fn truncates_nextest_failures() {
+        let summary = Summary {
+            diagnostics: Vec::new(),
+            test_failures: vec![
+                TestFailure {
+                    name: "crate::first".to_string(),
+                    stdout: vec!["stdout 1".to_string(), "stdout 2".to_string()],
+                    stderr: vec!["stderr 1".to_string(), "stderr 2".to_string()],
+                },
+                TestFailure {
+                    name: "crate::second".to_string(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+            ],
+            text_lines: Vec::new(),
+        };
+        let rendered = summary.render_with_limits(
+            Path::new("target/check-logs/test.log"),
+            &SummaryLimits {
+                max_diagnostics: 20,
+                max_failures: 1,
+                max_lines: 1,
+                max_line_chars: 240,
+                max_fallback_lines: 80,
+            },
+        );
+        assert!(rendered.contains("omitted 1 stdout lines"));
+        assert!(rendered.contains("omitted 1 stderr lines"));
+        assert!(rendered.contains("omitted 1 failed tests"));
     }
 
     #[test]
@@ -822,6 +989,27 @@ error: fallback duplicate
         let summary = summarize(Mode::Auto, input.as_bytes());
         assert_eq!(summary.diagnostics.len(), 1);
         assert!(summary.text_lines.is_empty());
+    }
+
+    #[test]
+    fn truncates_fallback_text() {
+        let summary = Summary {
+            diagnostics: Vec::new(),
+            test_failures: Vec::new(),
+            text_lines: vec!["line 1".to_string(), "line 2".to_string()],
+        };
+        let rendered = summary.render_with_limits(
+            Path::new("target/check-logs/check.log"),
+            &SummaryLimits {
+                max_diagnostics: 20,
+                max_failures: 20,
+                max_lines: 12,
+                max_line_chars: 240,
+                max_fallback_lines: 1,
+            },
+        );
+        assert!(rendered.contains("line 1"));
+        assert!(rendered.contains("omitted 1 fallback lines"));
     }
 
     #[test]
