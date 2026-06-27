@@ -1,0 +1,3 @@
+{"type":"test","event":"started","name":"sample::tests::panics_with_output"}
+{"type":"test","event":"failed","name":"sample::tests::panics_with_output","stdout":"about to panic\n","stderr":"thread 'panics_with_output' panicked at src/lib.rs:42:9:\nboom\n"}
+{"type":"suite","event":"failed"}

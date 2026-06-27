@@ -1,0 +1,10 @@
+Analyzing dependencies of crates in this directory...
+cargo-machete found the following unused dependencies in this directory:
+sample -- ./Cargo.toml:
+	anyhow
+	serde
+
+If you believe cargo-machete has detected an unused dependency incorrectly,
+you can add the dependency to the list of dependencies to ignore in the
+[package.metadata.cargo-machete] section of the appropriate Cargo.toml.
+Done!

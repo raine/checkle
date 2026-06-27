@@ -1,0 +1,5 @@
+advisories ok
+bans FAILED
+error[duplicate]: found 2 duplicate entries for crate `syn`
+    ├ syn v1.0.109
+    └ syn v2.0.48

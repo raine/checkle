@@ -1,0 +1,10 @@
+        FAIL [   0.123s] sample::tests panics_with_output
+--- STDOUT ---
+about to panic
+------------
+--- STDERR ---
+thread 'panics_with_output' panicked at src/lib.rs:42:9:
+boom
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+------------
+Summary [   0.123s] 1 test run: 0 passed, 1 failed, 0 skipped

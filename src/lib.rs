@@ -884,35 +884,58 @@ fn tail<T>(items: Vec<T>, limit: usize) -> Vec<T> {
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> &'static [u8] {
+        match name {
+            "cargo_clippy_warning" => {
+                include_bytes!("../tests/fixtures/cargo_clippy_warning.jsonl")
+            }
+            "cargo_error_rendered" => {
+                include_bytes!("../tests/fixtures/cargo_error_rendered.jsonl")
+            }
+            "cargo_doctest_failure" => {
+                include_bytes!("../tests/fixtures/cargo_doctest_failure.jsonl")
+            }
+            "nextest_human_failure" => {
+                include_bytes!("../tests/fixtures/nextest_human_failure.txt")
+            }
+            "nextest_json_failure" => {
+                include_bytes!("../tests/fixtures/nextest_json_failure.jsonl")
+            }
+            "rustfmt_diff" => include_bytes!("../tests/fixtures/rustfmt_diff.txt"),
+            "cargo_deny_json" => include_bytes!("../tests/fixtures/cargo_deny_json.jsonl"),
+            "cargo_deny_human" => include_bytes!("../tests/fixtures/cargo_deny_human.txt"),
+            "cargo_machete_unused" => include_bytes!("../tests/fixtures/cargo_machete_unused.txt"),
+            "ansi_colored_output" => include_bytes!("../tests/fixtures/ansi_colored_output.txt"),
+            "multiple_failures" => include_bytes!("../tests/fixtures/multiple_failures.txt"),
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn summarizes_cargo_json_diagnostics() {
-        let input = r#"not json
-{"reason":"compiler-message","message":{"level":"error","message":"sample failure","code":{"code":"clippy::sample"},"spans":[{"file_name":"src/lib.rs","line_start":1,"column_start":2,"is_primary":true}],"children":[{"level":"help","message":"try sample fix","spans":[]}]}}
-{"reason":"compiler-artifact"}
-"#;
-        let summary = summarize(Mode::Cargo, input.as_bytes());
+        let summary = summarize(Mode::Cargo, fixture("cargo_error_rendered"));
         assert_eq!(summary.diagnostics.len(), 1);
         assert_eq!(summary.diagnostics[0].severity, "error");
         assert_eq!(
             summary.diagnostics[0].location.as_deref(),
-            Some("src/lib.rs:1:2")
+            Some("src/main.rs:7:9")
         );
-        assert_eq!(
-            summary.diagnostics[0].code.as_deref(),
-            Some("clippy::sample")
+        assert_eq!(summary.diagnostics[0].code.as_deref(), Some("E0308"));
+        assert!(
+            summary.diagnostics[0]
+                .details
+                .contains(&"note: expected struct `String` found reference `&str`".to_string())
         );
-        assert_eq!(summary.diagnostics[0].details, vec!["help: try sample fix"]);
     }
 
     #[test]
     fn summarizes_cargo_warnings_and_context() {
-        let input = r#"{"reason":"compiler-message","message":{"level":"warning","message":"lint failure","code":{"code":"clippy::dbg_macro"},"spans":[{"file_name":"src/lib.rs","line_start":3,"column_start":4,"is_primary":true,"label":"primary label"},{"file_name":"src/lib.rs","line_start":8,"column_start":9,"is_primary":false,"label":"secondary label"}],"children":[{"level":"help","message":"remove dbg","spans":[]},{"level":"note","message":"lint comes from command line","spans":[{"file_name":"src/main.rs","line_start":1,"column_start":1,"is_primary":false,"label":"note span"}]}],"rendered":"warning: lint failure\n  = note: rendered note\n  = help: rendered help\n"}}"#;
-        let summary = summarize(Mode::Cargo, input.as_bytes());
+        let summary = summarize(Mode::Cargo, fixture("cargo_clippy_warning"));
         assert_eq!(summary.diagnostics.len(), 1);
         assert_eq!(summary.diagnostics[0].severity, "warning");
         assert_eq!(
             summary.diagnostics[0].location.as_deref(),
-            Some("src/lib.rs:3:4")
+            Some("src/lib.rs:4:5")
         );
         assert_eq!(
             summary.diagnostics[0].code.as_deref(),
@@ -921,27 +944,7 @@ mod tests {
         assert!(
             summary.diagnostics[0]
                 .details
-                .contains(&"src/lib.rs:8:9: secondary label".to_string())
-        );
-        assert!(
-            summary.diagnostics[0]
-                .details
-                .contains(&"help: remove dbg".to_string())
-        );
-        assert!(
-            summary.diagnostics[0]
-                .details
-                .contains(&"note: lint comes from command line".to_string())
-        );
-        assert!(
-            summary.diagnostics[0]
-                .details
-                .contains(&"src/main.rs:1:1: note span".to_string())
-        );
-        assert!(
-            summary.diagnostics[0]
-                .details
-                .contains(&"  = note: rendered note".to_string())
+                .contains(&"help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#dbg_macro".to_string())
         );
     }
 
@@ -1003,14 +1006,20 @@ mod tests {
 
     #[test]
     fn summarizes_nextest_json_failures() {
-        let input = r#"{"type":"test","event":"failed","name":"crate::test_name","stdout":"a\nb\nc","stderr":"panic\nbacktrace"}
-{"type":"suite","event":"failed"}
-"#;
-        let summary = summarize(Mode::Nextest, input.as_bytes());
+        let summary = summarize(Mode::Nextest, fixture("nextest_json_failure"));
         assert_eq!(summary.test_failures.len(), 1);
-        assert_eq!(summary.test_failures[0].name, "crate::test_name");
-        assert_eq!(summary.test_failures[0].stdout, vec!["a", "b", "c"]);
-        assert_eq!(summary.test_failures[0].stderr, vec!["panic", "backtrace"]);
+        assert_eq!(
+            summary.test_failures[0].name,
+            "sample::tests::panics_with_output"
+        );
+        assert_eq!(summary.test_failures[0].stdout, vec!["about to panic"]);
+        assert_eq!(
+            summary.test_failures[0].stderr,
+            vec![
+                "thread 'panics_with_output' panicked at src/lib.rs:42:9:",
+                "boom"
+            ]
+        );
     }
 
     #[test]
@@ -1074,10 +1083,15 @@ mod tests {
 
     #[test]
     fn summarizes_nextest_text_failures() {
-        let input = "        FAIL [   1.000s] crate test_name\n--- STDOUT ---\nline1\nline2\n------------\nSummary [   1.000s] 1 test run: 0 passed, 1 failed\n";
-        let summary = summarize(Mode::Nextest, input.as_bytes());
+        let summary = summarize(Mode::Nextest, fixture("nextest_human_failure"));
         assert!(summary.text_lines.iter().any(|line| line.contains("FAIL")));
-        assert!(summary.text_lines.iter().any(|line| line == "  line1"));
+        assert!(
+            summary
+                .text_lines
+                .iter()
+                .any(|line| line == "  about to panic")
+        );
+        assert!(summary.text_lines.iter().any(|line| line.contains("boom")));
         assert!(
             summary
                 .text_lines
@@ -1088,41 +1102,44 @@ mod tests {
 
     #[test]
     fn summarizes_rustfmt_diffs() {
-        let input = "noise\nDiff in /tmp/example.rs:1:\n- bad\n+ good\n";
-        let summary = summarize(Mode::Rustfmt, input.as_bytes());
+        let summary = summarize(Mode::Rustfmt, fixture("rustfmt_diff"));
         assert_eq!(
             summary.text_lines,
-            vec!["Diff in /tmp/example.rs:1:", "- bad", "+ good"]
+            vec![
+                "Diff in /workspace/src/lib.rs:1:",
+                "-fn main(){println!(\"hi\");}",
+                "+fn main() {",
+                "+    println!(\"hi\");",
+                "+}",
+            ]
         );
     }
 
     #[test]
     fn summarizes_cargo_deny_findings() {
-        let input = "noise\nadvisories ok\nerror[duplicate]: duplicate dependency\n    ├ crate-a\n    └ crate-b\n";
-        let summary = summarize(Mode::CargoDeny, input.as_bytes());
+        let summary = summarize(Mode::CargoDeny, fixture("cargo_deny_human"));
         assert_eq!(
             summary.text_lines,
             vec![
                 "advisories ok",
-                "error[duplicate]: duplicate dependency",
-                "    ├ crate-a",
-                "    └ crate-b",
+                "bans FAILED",
+                "error[duplicate]: found 2 duplicate entries for crate `syn`",
+                "    ├ syn v1.0.109",
+                "    └ syn v2.0.48",
             ]
         );
     }
 
     #[test]
     fn summarizes_cargo_deny_json_diagnostics() {
-        let input = r#"{"type":"diagnostic","fields":{"severity":"error","code":"bans","message":"duplicate crate","labels":[{"message":"crate-a v1","line":12,"column":5}],"notes":["only one version is allowed"]}}
-{"type":"log","fields":{"message":"done"}}
-"#;
-        let summary = summarize(Mode::CargoDeny, input.as_bytes());
+        let summary = summarize(Mode::CargoDeny, fixture("cargo_deny_json"));
         assert_eq!(
             summary.text_lines,
             vec![
-                "error[bans]: duplicate crate",
-                "  12:5: crate-a v1",
-                "  note: only one version is allowed",
+                "error[bans]: found duplicate versions for crate",
+                "  20:1: crate `syn` v1.0.109",
+                "  24:1: crate `syn` v2.0.48",
+                "  note: multiple versions increase build time",
             ]
         );
     }
@@ -1178,11 +1195,7 @@ error: fallback duplicate
 
     #[test]
     fn truncates_fallback_text() {
-        let summary = Summary {
-            diagnostics: Vec::new(),
-            test_failures: Vec::new(),
-            text_lines: vec!["line 1".to_string(), "line 2".to_string()],
-        };
+        let summary = summarize(Mode::Auto, fixture("multiple_failures"));
         let rendered = summary.render_with_limits(
             Path::new("target/check-logs/check.log"),
             &SummaryLimits {
@@ -1193,14 +1206,41 @@ error: fallback duplicate
                 max_fallback_lines: 1,
             },
         );
-        assert!(rendered.contains("line 1"));
-        assert!(rendered.contains("omitted 1 fallback lines"));
+        assert!(rendered.contains("error: first failure"));
+        assert!(rendered.contains("omitted 2 fallback lines"));
+    }
+
+    #[test]
+    fn supports_non_utf8_input() {
+        let summary = summarize(Mode::Auto, b"error: before\n\xff\nwarning: after\n");
+        assert_eq!(
+            summary.text_lines,
+            vec!["error: before".to_string(), "warning: after".to_string()]
+        );
+    }
+
+    #[test]
+    fn supports_empty_failing_output() {
+        let summary = summarize(Mode::Auto, b"");
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn documents_ansi_colored_fallback_limit() {
+        let summary = summarize(Mode::Auto, fixture("ansi_colored_output"));
+        assert!(summary.is_empty());
     }
 
     #[test]
     fn summarizes_cargo_machete_findings() {
-        let input = "noise\nThe following dependencies seem to be unused:\n  anyhow\n  serde\n";
-        let summary = summarize(Mode::CargoMachete, input.as_bytes());
-        assert_eq!(summary.text_lines, vec!["  anyhow", "  serde"]);
+        let summary = summarize(Mode::CargoMachete, fixture("cargo_machete_unused"));
+        assert_eq!(
+            summary.text_lines,
+            vec![
+                "cargo-machete found the following unused dependencies in this directory:",
+                "\tanyhow",
+                "\tserde",
+            ]
+        );
     }
 }

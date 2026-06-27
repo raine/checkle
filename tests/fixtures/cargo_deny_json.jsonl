@@ -1,0 +1,2 @@
+{"type":"diagnostic","fields":{"severity":"error","code":"bans","message":"found duplicate versions for crate","labels":[{"message":"crate `syn` v1.0.109","line":20,"column":1},{"message":"crate `syn` v2.0.48","line":24,"column":1}],"notes":["multiple versions increase build time"]}}
+{"type":"log","fields":{"level":"INFO","message":"finished"}}
