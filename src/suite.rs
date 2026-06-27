@@ -370,7 +370,7 @@ fn execute_specs_with_progress(
     let mut statuses: Vec<Option<SuiteStatus>> = vec![None; specs.len()];
     let mut remaining = specs.len();
     let mut frame = 0;
-    let mut drawn_lines = 0;
+    let mut saved_progress_cursor = false;
     if progress {
         eprint!("\x1b[?25l");
     }
@@ -390,19 +390,19 @@ fn execute_specs_with_progress(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
         if progress {
-            drawn_lines = render_progress(
+            saved_progress_cursor = render_progress(
                 &specs,
                 &statuses,
                 &started,
                 &log_dir_path,
                 frame,
-                drawn_lines,
+                saved_progress_cursor,
             );
             frame = (frame + 1) % FRAMES.len();
         }
     }
     if progress {
-        clear_progress(drawn_lines);
+        clear_progress(saved_progress_cursor);
         eprint!("\x1b[?25h");
     }
 
@@ -437,16 +437,17 @@ fn render_progress(
     started: &[Instant],
     log_dir: &std::path::Path,
     frame: usize,
-    drawn_lines: usize,
-) -> usize {
-    clear_progress(drawn_lines);
+    _drawn: bool,
+) -> bool {
+    eprint!("\r\x1b[2K");
+
     let name_width = specs
         .iter()
         .map(|spec| spec.label.len())
         .max()
         .unwrap_or_default();
-    let terminal_width = terminal_width().unwrap_or(120);
-    let lines: Vec<String> = specs
+    let terminal_width = terminal_width().unwrap_or(80).saturating_sub(1);
+    let line = specs
         .iter()
         .enumerate()
         .filter(|(index, _spec)| statuses[*index].is_none())
@@ -461,11 +462,11 @@ fn render_progress(
             );
             progress_line(&prefix, &latest_log_line(&log_path), terminal_width)
         })
-        .collect();
-    for line in &lines {
-        eprintln!("\x1b[2K{line}");
-    }
-    lines.len()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    eprint!("{}", limit_progress_detail(&line, terminal_width));
+    let _ = std::io::stderr().flush();
+    true
 }
 
 fn progress_line(prefix: &str, detail: &str, terminal_width: usize) -> String {
@@ -508,16 +509,11 @@ fn terminal_width() -> Option<usize> {
     parts.next()?.parse().ok()
 }
 
-fn clear_progress(lines: usize) {
-    if lines == 0 {
-        return;
+fn clear_progress(drawn: bool) {
+    if drawn {
+        eprint!("\r\x1b[2K");
+        let _ = std::io::stderr().flush();
     }
-    eprint!("\x1b[{lines}A");
-    for _ in 0..lines {
-        eprintln!("\x1b[2K");
-    }
-    eprint!("\x1b[{lines}A");
-    let _ = std::io::stderr().flush();
 }
 
 fn latest_log_line(path: &std::path::Path) -> String {
