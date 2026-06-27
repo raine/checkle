@@ -74,6 +74,23 @@ cargo-machete:
 
 Use `--mode auto` for unknown checks. Specific modes produce better summaries.
 
+## Local checks
+
+Run the project checks with:
+
+```sh
+just check
+```
+
+Run `checkle` against this repository with:
+
+```sh
+just self-check
+```
+
+The self-check recipe installs the local binary and writes full logs under
+`target/check-logs` while keeping terminal output compact.
+
 ## Agent guidance
 
 Agents should use project `just` recipes that wrap checks through `checkle`.
