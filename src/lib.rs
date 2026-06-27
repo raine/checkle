@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -218,33 +222,127 @@ pub fn run(options: RunOptions) -> Result<i32> {
         .with_context(|| format!("create log directory {}", log_dir.display()))?;
     let log_path = log_dir.join(format!("{}.log", safe_label(&options.label)));
 
-    let output = Command::new(&options.command[0])
-        .args(&options.command[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("run {}", options.command[0]))?;
+    let run_output = run_command(&options.command, &log_path)?;
 
-    let mut combined = output.stdout;
-    combined.extend_from_slice(&output.stderr);
-    std::fs::write(&log_path, &combined)
-        .with_context(|| format!("write log {}", log_path.display()))?;
-
-    let status = output.status.code().unwrap_or(1);
+    let status = status_code(run_output.status);
     if status == 0 {
         return Ok(0);
     }
 
-    let summary = summarize_for_command(options.mode, &options.command, &combined);
+    let summary = summarize_for_command(options.mode, &options.command, run_output.text.as_bytes());
     if summary.is_empty() {
         eprintln!("full log: {}\n", log_path.display());
         eprintln!("no compact diagnostics found; showing recent log output:\n");
-        eprint!("{}", recent_text(&combined, 80));
+        eprint!("{}", recent_text(run_output.text.as_bytes(), 80));
     } else {
         eprint!("{}", summary.render_with_limits(&log_path, &options.limits));
     }
 
     Ok(status)
+}
+
+#[derive(Debug)]
+struct RunOutput {
+    status: ExitStatus,
+    text: String,
+}
+
+#[derive(Debug)]
+enum StreamEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+fn run_command(command: &[String], log_path: &Path) -> Result<RunOutput> {
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {}", command[0]))?;
+
+    let stdout = child.stdout.take().context("capture child stdout")?;
+    let stderr = child.stderr.take().context("capture child stderr")?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_thread = stream_reader(stdout, sender.clone(), StreamKind::Stdout);
+    let stderr_thread = stream_reader(stderr, sender, StreamKind::Stderr);
+
+    let mut log =
+        File::create(log_path).with_context(|| format!("write log {}", log_path.display()))?;
+    let mut text = String::new();
+    for event in receiver {
+        let (label, bytes) = match event {
+            StreamEvent::Stdout(bytes) => ("stdout", bytes),
+            StreamEvent::Stderr(bytes) => ("stderr", bytes),
+        };
+        write_stream_event(&mut log, label, &bytes)
+            .with_context(|| format!("write log {}", log_path.display()))?;
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("wait for {}", command[0]))?;
+    join_reader(stdout_thread)?;
+    join_reader(stderr_thread)?;
+    Ok(RunOutput { status, text })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+fn stream_reader<R>(
+    reader: R,
+    sender: mpsc::Sender<StreamEvent>,
+    kind: StreamKind,
+) -> thread::JoinHandle<Result<()>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            let count = reader.read_until(b'\n', &mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let event = match kind {
+                StreamKind::Stdout => StreamEvent::Stdout(buffer.clone()),
+                StreamKind::Stderr => StreamEvent::Stderr(buffer.clone()),
+            };
+            if sender.send(event).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn write_stream_event(log: &mut File, label: &str, bytes: &[u8]) -> std::io::Result<()> {
+    log.write_all(b"[")?;
+    log.write_all(label.as_bytes())?;
+    log.write_all(b"] ")?;
+    log.write_all(bytes)?;
+    if !bytes.ends_with(b"\n") {
+        log.write_all(b"\n")?;
+    }
+    log.flush()
+}
+
+fn join_reader(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => bail!("stream reader thread panicked"),
+    }
+}
+
+fn status_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
 }
 
 pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {
