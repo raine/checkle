@@ -1,11 +1,11 @@
 use std::collections::HashSet;
-use std::io::Write as _;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Deserialize;
 
 use crate::{
@@ -368,12 +368,8 @@ fn execute_specs_with_progress(
 
     let started: Vec<Instant> = specs.iter().map(|_| Instant::now()).collect();
     let mut statuses: Vec<Option<SuiteStatus>> = vec![None; specs.len()];
+    let progress_bars = progress.then(|| progress_bars(&specs));
     let mut remaining = specs.len();
-    let mut frame = 0;
-    let mut saved_progress_cursor = false;
-    if progress {
-        eprint!("\x1b[?25l");
-    }
     while remaining > 0 {
         match receiver.recv_timeout(Duration::from_millis(90)) {
             Ok((index, spec, elapsed, result)) => {
@@ -384,26 +380,29 @@ fn execute_specs_with_progress(
                     elapsed,
                     result,
                 });
+                if let Some(progress_bars) = &progress_bars {
+                    progress_bars.bars[index].finish_and_clear();
+                }
                 remaining -= 1;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if progress {
-            saved_progress_cursor = render_progress(
+        if let Some(progress_bars) = &progress_bars {
+            update_progress(
+                &progress_bars.bars,
                 &specs,
                 &statuses,
                 &started,
                 &log_dir_path,
-                frame,
-                saved_progress_cursor,
             );
-            frame = (frame + 1) % FRAMES.len();
         }
     }
-    if progress {
-        clear_progress(saved_progress_cursor);
-        eprint!("\x1b[?25h");
+    if let Some(progress_bars) = &progress_bars {
+        for bar in &progress_bars.bars {
+            bar.finish_and_clear();
+        }
+        let _ = progress_bars.multi.clear();
     }
 
     for handle in handles {
@@ -431,88 +430,48 @@ fn execute_specs_with_progress(
 
 const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn render_progress(
-    specs: &[RunSpec],
-    statuses: &[Option<SuiteStatus>],
-    started: &[Instant],
-    log_dir: &std::path::Path,
-    frame: usize,
-    _drawn: bool,
-) -> bool {
-    eprint!("\r\x1b[2K");
+struct SuiteProgress {
+    multi: MultiProgress,
+    bars: Vec<ProgressBar>,
+}
 
+fn progress_bars(specs: &[RunSpec]) -> SuiteProgress {
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(12));
     let name_width = specs
         .iter()
         .map(|spec| spec.label.len())
         .max()
         .unwrap_or_default();
-    let terminal_width = terminal_width().unwrap_or(80).saturating_sub(1);
-    let line = specs
+    let style = ProgressStyle::with_template("{spinner} {prefix}  {elapsed} {wide_msg}")
+        .expect("progress style template is valid")
+        .tick_strings(FRAMES);
+    let bars = specs
         .iter()
-        .enumerate()
-        .filter(|(index, _spec)| statuses[*index].is_none())
-        .map(|(index, spec)| {
-            let log_path = log_dir.join(format!("{}.log", spec.label));
-            let prefix = format!(
-                "{} {:<width$}  {}",
-                FRAMES[frame],
-                spec.label,
-                elapsed_seconds(started[index].elapsed()),
-                width = name_width
-            );
-            progress_line(&prefix, &latest_log_line(&log_path), terminal_width)
+        .map(|spec| {
+            let bar = multi.add(ProgressBar::new_spinner());
+            bar.set_style(style.clone());
+            bar.set_prefix(format!("{:<width$}", spec.label, width = name_width));
+            bar.enable_steady_tick(Duration::from_millis(90));
+            bar
         })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    eprint!("{}", limit_progress_detail(&line, terminal_width));
-    let _ = std::io::stderr().flush();
-    true
+        .collect();
+    SuiteProgress { multi, bars }
 }
 
-fn progress_line(prefix: &str, detail: &str, terminal_width: usize) -> String {
-    let detail = detail.trim();
-    if detail.is_empty() {
-        return prefix.to_string();
-    }
-
-    let budget = terminal_width.saturating_sub(prefix.chars().count() + 1);
-    if budget == 0 {
-        prefix.to_string()
-    } else {
-        format!("{prefix} {}", limit_progress_detail(detail, budget))
-    }
-}
-
-fn limit_progress_detail(detail: &str, max_chars: usize) -> String {
-    const ELLIPSIS: &str = "...";
-    if detail.chars().count() <= max_chars {
-        return detail.to_string();
-    }
-    if max_chars <= ELLIPSIS.len() {
-        return ELLIPSIS.chars().take(max_chars).collect();
-    }
-
-    let keep = max_chars - ELLIPSIS.len();
-    let mut trimmed: String = detail.chars().take(keep).collect();
-    trimmed.push_str(ELLIPSIS);
-    trimmed
-}
-
-fn terminal_width() -> Option<usize> {
-    let output = Command::new("stty").arg("size").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let mut parts = text.split_whitespace();
-    let _rows = parts.next()?;
-    parts.next()?.parse().ok()
-}
-
-fn clear_progress(drawn: bool) {
-    if drawn {
-        eprint!("\r\x1b[2K");
-        let _ = std::io::stderr().flush();
+fn update_progress(
+    bars: &[ProgressBar],
+    specs: &[RunSpec],
+    statuses: &[Option<SuiteStatus>],
+    started: &[Instant],
+    log_dir: &std::path::Path,
+) {
+    for (index, bar) in bars.iter().enumerate() {
+        if statuses[index].is_none() {
+            let log_path = log_dir.join(format!("{}.log", specs[index].label));
+            bar.set_message(latest_log_line(&log_path));
+            bar.set_position(started[index].elapsed().as_secs());
+            bar.tick();
+        }
     }
 }
 
@@ -690,21 +649,24 @@ mod tests {
     }
 
     #[test]
-    fn progress_line_fits_terminal_width() {
-        let line = progress_line(
-            "⠏ cargo-deny     1s",
-            "[stderr] {\"message\":\"found duplicate versions\"}",
-            36,
-        );
+    fn creates_one_progress_bar_per_spec() {
+        let progress = progress_bars(&[
+            RunSpec {
+                label: "format-check".to_string(),
+                mode: Mode::Rustfmt,
+                command: vec!["cargo".to_string(), "fmt".to_string()],
+            },
+            RunSpec {
+                label: "test".to_string(),
+                mode: Mode::Cargo,
+                command: vec!["cargo".to_string(), "test".to_string()],
+            },
+        ]);
 
-        assert_eq!(line, "⠏ cargo-deny     1s [stderr] {\"me...");
-        assert_eq!(line.chars().count(), 36);
-    }
-
-    #[test]
-    fn progress_line_omits_detail_without_space() {
-        let line = progress_line("✓ format-check   1s", "", 36);
-
-        assert_eq!(line, "✓ format-check   1s");
+        assert_eq!(progress.bars.len(), 2);
+        for bar in progress.bars {
+            bar.finish_and_clear();
+        }
+        let _ = progress.multi.clear();
     }
 }
