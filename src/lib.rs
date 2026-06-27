@@ -139,7 +139,7 @@ pub fn run(options: RunOptions) -> Result<i32> {
         return Ok(0);
     }
 
-    let summary = summarize(options.mode, &combined);
+    let summary = summarize_for_command(options.mode, &options.command, &combined);
     if summary.is_empty() {
         eprintln!("full log: {}\n", log_path.display());
         eprintln!("no compact diagnostics found; showing recent log output:\n");
@@ -152,71 +152,193 @@ pub fn run(options: RunOptions) -> Result<i32> {
 }
 
 pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {
+    summarize_for_command(mode, &[], bytes)
+}
+
+pub fn summarize_for_command(mode: Mode, command: &[String], bytes: &[u8]) -> Summary {
     let text = String::from_utf8_lossy(bytes);
-    let mut summary = Summary {
-        diagnostics: Vec::new(),
-        test_failures: Vec::new(),
-        text_lines: Vec::new(),
-    };
-
-    if matches!(mode, Mode::Auto | Mode::Cargo | Mode::Nextest) {
-        summary.diagnostics.extend(cargo_diagnostics(text.as_ref()));
-    }
-    if matches!(mode, Mode::Auto | Mode::Nextest) {
-        summary
-            .test_failures
-            .extend(nextest_failures(text.as_ref()));
-        if summary.test_failures.is_empty() {
-            summary
-                .text_lines
-                .extend(nextest_text_summary(text.as_ref()));
+    match detect_mode(mode, command, text.as_ref()) {
+        Mode::Cargo => Summary {
+            diagnostics: cargo_diagnostics(text.as_ref()),
+            test_failures: Vec::new(),
+            text_lines: Vec::new(),
+        },
+        Mode::Nextest => {
+            let test_failures = nextest_failures(text.as_ref());
+            let text_lines = if test_failures.is_empty() {
+                nextest_text_summary(text.as_ref())
+            } else {
+                Vec::new()
+            };
+            Summary {
+                diagnostics: Vec::new(),
+                test_failures,
+                text_lines,
+            }
         }
+        Mode::Rustfmt => Summary {
+            diagnostics: Vec::new(),
+            test_failures: Vec::new(),
+            text_lines: rustfmt_summary(text.as_ref()),
+        },
+        Mode::CargoDeny => Summary {
+            diagnostics: Vec::new(),
+            test_failures: Vec::new(),
+            text_lines: cargo_deny_summary(text.as_ref()),
+        },
+        Mode::CargoMachete => Summary {
+            diagnostics: Vec::new(),
+            test_failures: Vec::new(),
+            text_lines: cargo_machete_summary(text.as_ref()),
+        },
+        Mode::Auto => Summary {
+            diagnostics: Vec::new(),
+            test_failures: Vec::new(),
+            text_lines: fallback_summary(text.as_ref()),
+        },
     }
-    if matches!(mode, Mode::Rustfmt) {
-        summary.text_lines.extend(rustfmt_summary(text.as_ref()));
-    }
-    if matches!(mode, Mode::CargoDeny) {
-        summary.text_lines.extend(grep_summary(
-            text.as_ref(),
-            80,
-            &[
-                "error[",
-                "warning[",
-                "advisories",
-                "bans",
-                "licenses",
-                "sources",
-                "    ├",
-                "    └",
-                "    │",
-            ],
-        ));
-    }
-    if matches!(mode, Mode::CargoMachete) {
-        summary.text_lines.extend(grep_summary(
-            text.as_ref(),
-            80,
-            &[
-                "Error:",
-                "warning:",
-                "The following dependencies seem to be unused",
-                "  ",
-            ],
-        ));
-    }
-    if matches!(mode, Mode::Auto)
-        && summary.diagnostics.is_empty()
-        && summary.test_failures.is_empty()
-        && summary.text_lines.is_empty()
-    {
-        summary.text_lines.extend(grep_summary(
-            text.as_ref(),
-            80,
-            &["error:", "warning:", "   -->", "help:", "FAIL", "Summary"],
-        ));
-    }
+}
 
-    summary
+fn detect_mode(mode: Mode, command: &[String], text: &str) -> Mode {
+    if mode != Mode::Auto {
+        return mode;
+    }
+    if looks_like_cargo_json(text) {
+        return Mode::Cargo;
+    }
+    if looks_like_nextest_json(text)
+        || looks_like_nextest_command(command)
+        || looks_like_nextest_text(text)
+    {
+        return Mode::Nextest;
+    }
+    if looks_like_rustfmt_command(command) || looks_like_rustfmt_output(text) {
+        return Mode::Rustfmt;
+    }
+    if looks_like_cargo_deny_command(command) || looks_like_cargo_deny_output(text) {
+        return Mode::CargoDeny;
+    }
+    if looks_like_cargo_machete_command(command) || looks_like_cargo_machete_output(text) {
+        return Mode::CargoMachete;
+    }
+    Mode::Auto
+}
+
+fn looks_like_cargo_json(text: &str) -> bool {
+    text.lines().any(|line| {
+        serde_json::from_str::<CargoEvent>(line)
+            .map(|event| event.reason.as_deref() == Some("compiler-message"))
+            .unwrap_or(false)
+    })
+}
+
+fn looks_like_nextest_json(text: &str) -> bool {
+    text.lines().any(|line| {
+        serde_json::from_str::<NextestEvent>(line)
+            .map(|event| event.kind.as_deref() == Some("test"))
+            .unwrap_or(false)
+    })
+}
+
+fn looks_like_nextest_text(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("FAIL ")
+            || trimmed.starts_with("TRY ") && trimmed.contains(" FAIL ")
+            || trimmed.starts_with("LEAK-FAIL ")
+            || trimmed.starts_with("TIMEOUT ")
+            || line.starts_with("Summary ") && line.contains(" test run")
+    })
+}
+
+fn looks_like_nextest_command(command: &[String]) -> bool {
+    command
+        .windows(2)
+        .any(|words| words[0] == "cargo" && words[1] == "nextest")
+        || command.iter().any(|word| word == "cargo-nextest")
+}
+
+fn looks_like_rustfmt_command(command: &[String]) -> bool {
+    command.iter().any(|word| word == "rustfmt")
+        || command
+            .windows(2)
+            .any(|words| words[0] == "cargo" && words[1] == "fmt")
+}
+
+fn looks_like_rustfmt_output(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.starts_with("Diff in") || line.starts_with("Error writing files"))
+}
+
+fn looks_like_cargo_deny_command(command: &[String]) -> bool {
+    command
+        .windows(2)
+        .any(|words| words[0] == "cargo" && words[1] == "deny")
+        || command.iter().any(|word| word == "cargo-deny")
+}
+
+fn looks_like_cargo_deny_output(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with("error[")
+            || line.starts_with("warning[")
+            || line.starts_with("advisories")
+            || line.starts_with("bans")
+            || line.starts_with("licenses")
+            || line.starts_with("sources")
+    })
+}
+
+fn looks_like_cargo_machete_command(command: &[String]) -> bool {
+    command
+        .windows(2)
+        .any(|words| words[0] == "cargo" && words[1] == "machete")
+        || command.iter().any(|word| word == "cargo-machete")
+}
+
+fn looks_like_cargo_machete_output(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with("The following dependencies seem to be unused")
+            || line.starts_with("Error:") && line.contains("unused")
+    })
+}
+
+fn cargo_deny_summary(text: &str) -> Vec<String> {
+    grep_summary(
+        text,
+        80,
+        &[
+            "error[",
+            "warning[",
+            "advisories",
+            "bans",
+            "licenses",
+            "sources",
+            "    ├",
+            "    └",
+            "    │",
+        ],
+    )
+}
+
+fn cargo_machete_summary(text: &str) -> Vec<String> {
+    grep_summary(
+        text,
+        80,
+        &[
+            "Error:",
+            "warning:",
+            "The following dependencies seem to be unused",
+            "  ",
+        ],
+    )
+}
+
+fn fallback_summary(text: &str) -> Vec<String> {
+    grep_summary(
+        text,
+        80,
+        &["error:", "warning:", "   -->", "help:", "FAIL", "Summary"],
+    )
 }
 
 fn safe_label(label: &str) -> String {
@@ -651,6 +773,55 @@ mod tests {
                 "    └ crate-b",
             ]
         );
+    }
+
+    #[test]
+    fn auto_detects_supported_formats() {
+        let cargo = r#"{"reason":"compiler-message","message":{"level":"error","message":"sample","spans":[],"children":[]}}"#;
+        assert_eq!(summarize(Mode::Auto, cargo.as_bytes()).diagnostics.len(), 1);
+
+        let nextest = r#"{"type":"test","event":"failed","name":"crate::test","stderr":"panic"}"#;
+        assert_eq!(
+            summarize(Mode::Auto, nextest.as_bytes())
+                .test_failures
+                .len(),
+            1
+        );
+
+        let rustfmt = "Diff in /tmp/example.rs:1:\n- bad\n+ good\n";
+        assert_eq!(
+            summarize(Mode::Auto, rustfmt.as_bytes()).text_lines[0],
+            "Diff in /tmp/example.rs:1:"
+        );
+
+        let deny = "advisories ok\nerror[duplicate]: duplicate dependency\n";
+        assert_eq!(
+            summarize(Mode::Auto, deny.as_bytes()).text_lines,
+            vec!["advisories ok", "error[duplicate]: duplicate dependency"]
+        );
+
+        let machete = "The following dependencies seem to be unused:\n  anyhow\n";
+        assert_eq!(
+            summarize(Mode::Auto, machete.as_bytes()).text_lines,
+            vec!["The following dependencies seem to be unused:", "  anyhow"]
+        );
+    }
+
+    #[test]
+    fn auto_uses_command_when_content_is_ambiguous() {
+        let command = vec!["cargo".to_string(), "fmt".to_string()];
+        let summary = summarize_for_command(Mode::Auto, &command, b"error: bad format\n");
+        assert_eq!(summary.text_lines, vec!["error: bad format"]);
+    }
+
+    #[test]
+    fn auto_uses_one_parser() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"error","message":"sample","spans":[],"children":[]}}
+error: fallback duplicate
+"#;
+        let summary = summarize(Mode::Auto, input.as_bytes());
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert!(summary.text_lines.is_empty());
     }
 
     #[test]
