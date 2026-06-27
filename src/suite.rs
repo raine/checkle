@@ -440,6 +440,7 @@ fn render_progress(
         .map(|spec| spec.label.len())
         .max()
         .unwrap_or_default();
+    let terminal_width = terminal_width().unwrap_or(120);
     for (index, spec) in specs.iter().enumerate() {
         let (glyph, elapsed, detail) = match &statuses[index] {
             Some(status) => {
@@ -458,15 +459,56 @@ fn render_progress(
                 )
             }
         };
-        eprintln!(
-            "\x1b[2K{} {:<width$}  {} {}",
+        let prefix = format!(
+            "{} {:<width$}  {}",
             glyph,
             spec.label,
             elapsed,
-            detail,
             width = name_width
         );
+        let line = progress_line(&prefix, &detail, terminal_width);
+        eprintln!("\x1b[2K{line}");
     }
+}
+
+fn progress_line(prefix: &str, detail: &str, terminal_width: usize) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return prefix.to_string();
+    }
+
+    let budget = terminal_width.saturating_sub(prefix.chars().count() + 1);
+    if budget == 0 {
+        prefix.to_string()
+    } else {
+        format!("{prefix} {}", limit_progress_detail(detail, budget))
+    }
+}
+
+fn limit_progress_detail(detail: &str, max_chars: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    if detail.chars().count() <= max_chars {
+        return detail.to_string();
+    }
+    if max_chars <= ELLIPSIS.len() {
+        return ELLIPSIS.chars().take(max_chars).collect();
+    }
+
+    let keep = max_chars - ELLIPSIS.len();
+    let mut trimmed: String = detail.chars().take(keep).collect();
+    trimmed.push_str(ELLIPSIS);
+    trimmed
+}
+
+fn terminal_width() -> Option<usize> {
+    let output = Command::new("stty").arg("size").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut parts = text.split_whitespace();
+    let _rows = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 fn clear_progress(lines: usize) {
@@ -652,5 +694,24 @@ mod tests {
 
         let log = std::fs::read_to_string(log_dir.join("sample.log")).unwrap();
         assert_eq!(log, "[stdout] hello\n");
+    }
+
+    #[test]
+    fn progress_line_fits_terminal_width() {
+        let line = progress_line(
+            "⠏ cargo-deny     1s",
+            "[stderr] {\"message\":\"found duplicate versions\"}",
+            36,
+        );
+
+        assert_eq!(line, "⠏ cargo-deny     1s [stderr] {\"me...");
+        assert_eq!(line.chars().count(), 36);
+    }
+
+    #[test]
+    fn progress_line_omits_detail_without_space() {
+        let line = progress_line("✓ format-check   1s", "", 36);
+
+        assert_eq!(line, "✓ format-check   1s");
     }
 }
