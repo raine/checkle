@@ -1,3 +1,6 @@
+mod format_staged;
+mod git;
+mod precommit;
 mod suite;
 
 use std::collections::VecDeque;
@@ -12,6 +15,8 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::Deserialize;
 
+pub use format_staged::FormatSummary;
+pub use precommit::{PreCommitOptions, format_staged_from_git_root, run_pre_commit};
 pub use suite::{
     ResolvedChecks, RunSpec, SkippedCheck, SuiteOptions, SuiteStatus, SuiteSummary, execute_specs,
     list_checks, resolve_checks, run_suite, tool_installed,

@@ -98,6 +98,33 @@ checkle --label doc-test --mode cargo -- cargo test --doc --message-format=json 
 
 Use `--mode auto` for unknown checks. Specific modes produce better summaries.
 
+## Pre-commit hook
+
+Format staged Rust files and run the project check group:
+
+```sh
+checkle pre-commit
+```
+
+`checkle pre-commit` formats staged `*.rs` files in the Git index, mirrors formatted output back to worktree files that had no unstaged edits, skips documentation and media-only commits, hides unstaged changes while checks run, and restores them afterward. It runs the configured `all` group by default. Pass check names to run a different set:
+
+```sh
+checkle pre-commit format-check clippy
+```
+
+Use the formatter without running checks:
+
+```sh
+checkle format-staged
+```
+
+Install it as a hook with a shim in `.git/hooks/pre-commit` or the repository hook path:
+
+```sh
+#!/bin/sh
+exec checkle pre-commit
+```
+
 ## Local checks
 
 Run the project checks with:

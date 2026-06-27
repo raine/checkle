@@ -46,6 +46,11 @@ enum Action {
         #[arg(value_name = "CHECK")]
         checks: Vec<String>,
     },
+    PreCommit {
+        #[arg(value_name = "CHECK")]
+        checks: Vec<String>,
+    },
+    FormatStaged,
 }
 
 fn main() -> Result<()> {
@@ -63,6 +68,12 @@ fn main() -> Result<()> {
             log_dir: cli.log_dir,
             limits,
         })?,
+        Some(Action::PreCommit { checks }) => checkle::run_pre_commit(checkle::PreCommitOptions {
+            checks,
+            log_dir: cli.log_dir,
+            limits,
+        })?,
+        Some(Action::FormatStaged) => checkle::format_staged_from_git_root()?,
         None => {
             if cli.command.is_empty() {
                 Cli::command().print_help()?;
