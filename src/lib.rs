@@ -201,7 +201,8 @@ fn limit_line(line: &str, max_chars: usize) -> String {
     trimmed
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Mode {
     #[default]
     Auto,

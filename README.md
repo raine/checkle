@@ -77,7 +77,20 @@ check:
     checkle run all
 ```
 
-Use the wrapper form for project-specific commands:
+Define project-specific checks in `checkle.toml`:
+
+```toml
+[[check]]
+name = "doc-test"
+mode = "cargo"
+command = ["cargo", "test", "--doc", "--message-format=json", "--locked"]
+
+[[group]]
+name = "all"
+checks = ["format-check", "clippy", "test", "doc-test", "static-analysis"]
+```
+
+Use the wrapper form for one-off project-specific commands:
 
 ```sh
 checkle --label doc-test --mode cargo -- cargo test --doc --message-format=json --locked

@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
 use crate::{
     Mode, RunOptions, RunResult, SummaryLimits, execute_check, render_report, summarize_for_command,
@@ -15,6 +16,33 @@ pub struct RunSpec {
     pub label: String,
     pub mode: Mode,
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFile {
+    #[serde(default)]
+    check: Vec<ConfigCheck>,
+    #[serde(default)]
+    group: Vec<ConfigGroup>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigCheck {
+    name: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    mode: Mode,
+    command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigGroup {
+    name: String,
+    checks: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,26 +198,77 @@ pub fn list_checks() -> String {
 }
 
 pub fn resolve_checks(names: &[String]) -> Result<ResolvedChecks> {
+    let config = read_config()?;
     let mut specs = Vec::new();
     let mut skipped = Vec::new();
     for name in names {
-        match name.as_str() {
-            "static-analysis" => resolve_group(STATIC_ANALYSIS, &mut specs, &mut skipped)?,
-            "all" => resolve_group(ALL_CHECKS, &mut specs, &mut skipped)?,
-            name => {
-                let check =
-                    builtin_check(name).with_context(|| format!("unknown check: {name}"))?;
-                if let Some(tool) = check.required_tool {
-                    if !tool_installed(tool) {
-                        bail!("required tool for {name} is not installed: {tool}");
-                    }
-                }
-                specs.push(check.to_run_spec());
-            }
-        }
+        resolve_name(name, &config, &mut specs, &mut skipped, false)?;
     }
     reject_duplicate_labels(&specs)?;
     Ok(ResolvedChecks { specs, skipped })
+}
+
+fn resolve_name(
+    name: &str,
+    config: &Option<ConfigFile>,
+    specs: &mut Vec<RunSpec>,
+    skipped: &mut Vec<SkippedCheck>,
+    from_group: bool,
+) -> Result<()> {
+    if let Some(config) = config {
+        if let Some(check) = config.check.iter().find(|check| check.name == name) {
+            specs.push(check.to_run_spec());
+            return Ok(());
+        }
+        if let Some(group) = config.group.iter().find(|group| group.name == name) {
+            for name in &group.checks {
+                resolve_name(name, &Some(config.clone()), specs, skipped, true)?;
+            }
+            return Ok(());
+        }
+    }
+
+    match name {
+        "static-analysis" => resolve_group(STATIC_ANALYSIS, specs, skipped)?,
+        "all" => resolve_group(ALL_CHECKS, specs, skipped)?,
+        name => {
+            let check = builtin_check(name).with_context(|| format!("unknown check: {name}"))?;
+            if let Some(tool) = check.required_tool {
+                if !tool_installed(tool) {
+                    if from_group {
+                        skipped.push(SkippedCheck {
+                            label: check.label.to_string(),
+                            reason: format!("{tool} not installed"),
+                        });
+                        return Ok(());
+                    }
+                    bail!("required tool for {name} is not installed: {tool}");
+                }
+            }
+            specs.push(check.to_run_spec());
+        }
+    }
+    Ok(())
+}
+
+fn read_config() -> Result<Option<ConfigFile>> {
+    let path = std::path::Path::new("checkle.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).context("read checkle.toml")?;
+    let config = toml::from_str(&text).context("parse checkle.toml")?;
+    Ok(Some(config))
+}
+
+impl ConfigCheck {
+    fn to_run_spec(&self) -> RunSpec {
+        RunSpec {
+            label: self.label.clone().unwrap_or_else(|| self.name.clone()),
+            mode: self.mode,
+            command: self.command.clone(),
+        }
+    }
 }
 
 fn reject_duplicate_labels(specs: &[RunSpec]) -> Result<()> {

@@ -1,0 +1,18 @@
+[[check]]
+name = "format-check"
+mode = "rustfmt"
+command = ["cargo", "fmt", "--all", "--", "--check"]
+
+[[check]]
+name = "clippy"
+mode = "cargo"
+command = ["cargo", "clippy", "--message-format=json", "--all-targets", "--locked", "--", "-D", "warnings"]
+
+[[check]]
+name = "test"
+mode = "cargo"
+command = ["cargo", "test", "--locked", "--message-format=json"]
+
+[[group]]
+name = "all"
+checks = ["format-check", "clippy", "test", "static-analysis"]
