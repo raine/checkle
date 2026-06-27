@@ -127,5 +127,5 @@ fn pre_commit_runs_configured_checks() {
         .args(["pre-commit"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("ok quick"));
+        .stderr(predicate::str::contains("✓ quick"));
 }

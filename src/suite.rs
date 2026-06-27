@@ -505,21 +505,29 @@ fn strip_ansi(line: &str) -> String {
 }
 
 fn render_suite_summary(summary: &SuiteSummary, limits: &SummaryLimits) {
+    let color = std::io::IsTerminal::is_terminal(&std::io::stderr());
     for status in &summary.statuses {
         match &status.result {
             Ok(result) if result.exit_code == 0 => {
-                eprintln!("ok {} ({})", status.label, elapsed_seconds(status.elapsed));
+                eprintln!(
+                    "{} {} ({})",
+                    status_glyph("✓", "32", color),
+                    status.label,
+                    elapsed_seconds(status.elapsed)
+                );
             }
             Ok(_) => {
                 eprintln!(
-                    "fail {} ({})",
+                    "{} {} ({})",
+                    status_glyph("✖", "31", color),
                     status.label,
                     elapsed_seconds(status.elapsed)
                 );
             }
             Err(_) => {
                 eprintln!(
-                    "error {} ({})",
+                    "{} {} ({})",
+                    status_glyph("!", "31", color),
                     status.label,
                     elapsed_seconds(status.elapsed)
                 );
@@ -555,6 +563,14 @@ fn render_suite_summary(summary: &SuiteSummary, limits: &SummaryLimits) {
 
     if failed > 0 {
         eprintln!("fail {}/{} checks failed", failed, summary.statuses.len());
+    }
+}
+
+fn status_glyph(glyph: &str, color_code: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[{color_code}m{glyph}\x1b[0m")
+    } else {
+        glyph.to_string()
     }
 }
 
