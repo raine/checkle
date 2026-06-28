@@ -646,11 +646,56 @@ fn cargo_deny_json_summary(text: &str) -> Vec<String> {
 }
 
 fn fallback_summary(text: &str) -> Vec<String> {
-    grep_summary(
-        text,
-        80,
-        &["error:", "warning:", "   -->", "help:", "FAIL", "Summary"],
-    )
+    let mut lines = Vec::new();
+    let mut remaining_context = 0;
+
+    for line in text.lines() {
+        if is_test_success_line(line) {
+            continue;
+        }
+
+        if is_fallback_anchor_line(line) {
+            lines.push(line.to_string());
+            remaining_context = if is_fallback_context_anchor_line(line) {
+                12
+            } else {
+                0
+            };
+            continue;
+        }
+
+        if remaining_context > 0 {
+            lines.push(line.to_string());
+            remaining_context -= 1;
+        }
+    }
+
+    tail(lines, 80)
+}
+
+fn is_fallback_anchor_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    line.starts_with("error:")
+        || line.starts_with("warning:")
+        || line.starts_with("   -->")
+        || line.starts_with("help:")
+        || line.starts_with("FAIL")
+        || line.starts_with("Summary")
+        || line.starts_with("failures:")
+        || line.starts_with("---- ")
+        || line.starts_with("test result:")
+        || trimmed.starts_with("thread '")
+        || trimmed.starts_with("test ") && trimmed.contains(" ... FAILED")
+}
+
+fn is_fallback_context_anchor_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    line.starts_with("---- ") || trimmed.starts_with("thread '")
+}
+
+fn is_test_success_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("test ") && trimmed.ends_with(" ... ok")
 }
 
 pub fn validate_label(label: &str) -> Result<()> {
@@ -908,7 +953,18 @@ fn grep_summary(text: &str, limit: usize, prefixes: &[&str]) -> Vec<String> {
 }
 
 fn recent_text(bytes: &[u8], limit: usize) -> String {
-    recent_lines(String::from_utf8_lossy(bytes).as_ref(), limit).join("\n") + "\n"
+    recent_output_lines(String::from_utf8_lossy(bytes).as_ref(), limit).join("\n") + "\n"
+}
+
+fn recent_output_lines(text: &str, limit: usize) -> Vec<String> {
+    tail(
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .filter(|line| !is_test_success_line(line))
+            .map(ToOwned::to_owned)
+            .collect(),
+        limit,
+    )
 }
 
 fn recent_lines(text: &str, limit: usize) -> Vec<String> {
@@ -1150,6 +1206,62 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("Summary"))
         );
+    }
+
+    #[test]
+    fn summarizes_fallback_test_failures_without_passed_tests() {
+        let input = r#"running 3 tests
+test sample::passes ... ok
+test sample::fails ... FAILED
+test sample::also_passes ... ok
+
+failures:
+
+---- sample::fails stdout ----
+thread 'sample::fails' panicked at src/lib.rs:42:9:
+boom
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    sample::fails
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"#;
+
+        let summary = summarize(Mode::Auto, input.as_bytes());
+
+        assert!(
+            summary
+                .text_lines
+                .iter()
+                .any(|line| line == "test sample::fails ... FAILED")
+        );
+        assert!(summary.text_lines.iter().any(|line| line == "boom"));
+        assert!(
+            summary
+                .text_lines
+                .iter()
+                .all(|line| !line.ends_with(" ... ok"))
+        );
+    }
+
+    #[test]
+    fn fallback_recent_output_omits_passed_tests() {
+        let input = b"test sample::passes ... ok\nstill useful\n";
+
+        let report = render_report(
+            &Summary {
+                diagnostics: Vec::new(),
+                test_failures: Vec::new(),
+                text_lines: Vec::new(),
+            },
+            Path::new("target/check-logs/test.log"),
+            &SummaryLimits::default(),
+            input,
+        );
+
+        assert!(report.contains("still useful"));
+        assert!(!report.contains("test sample::passes ... ok"));
     }
 
     #[test]
