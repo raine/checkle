@@ -381,7 +381,7 @@ fn execute_specs_with_progress(
                     result,
                 });
                 if let Some(progress_bars) = &progress_bars {
-                    finish_progress_bar(&progress_bars.bars[index], &statuses[index]);
+                    finish_progress_bar(&progress_bars.bars[index]);
                 }
                 remaining -= 1;
             }
@@ -472,13 +472,8 @@ fn update_progress(
     }
 }
 
-fn finish_progress_bar(bar: &ProgressBar, status: &Option<SuiteStatus>) {
-    match status.as_ref().map(|status| &status.result) {
-        Some(Ok(result)) if result.exit_code == 0 => bar.finish_with_message("✓"),
-        Some(Ok(_)) => bar.finish_with_message("✖"),
-        Some(Err(_)) => bar.finish_with_message("!"),
-        None => bar.finish_and_clear(),
-    }
+fn finish_progress_bar(bar: &ProgressBar) {
+    bar.finish_and_clear();
 }
 
 fn latest_log_line(path: &std::path::Path) -> String {
