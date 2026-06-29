@@ -62,6 +62,14 @@ install-dev:
 run *ARGS:
     cargo run -- "$@"
 
+# Release a new patch version
+release:
+    @just _release patch
+
+# Internal release helper
+_release bump:
+    @cargo-release {{bump}}
+
 # Install local binary and run core project checks
 self-check: install-local
     checkle run format-check clippy test
