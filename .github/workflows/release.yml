@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: checkle
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            artifact: checkle-darwin-arm64
+            use_cross: false
+          - os: macos-15
+            target: x86_64-apple-darwin
+            artifact: checkle-darwin-amd64
+            use_cross: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: checkle-linux-amd64
+            use_cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: checkle-linux-arm64
+            use_cross: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" == "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+      - name: Package
+        run: |
+          bin="target/${{ matrix.target }}/release/${BIN_NAME}"
+          tar -C "$(dirname "$bin")" -czf ${{ matrix.artifact }}.tar.gz ${BIN_NAME}
+          shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.sha256
+      - name: Smoke test packaged binary
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: |
+          package_dir="package-${{ matrix.artifact }}"
+          mkdir "$package_dir"
+          tar -xzf ${{ matrix.artifact }}.tar.gz -C "$package_dir"
+          "$package_dir/${BIN_NAME}" --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ github.token }}
+          generate_release_notes: true
+          files: |
+            *.tar.gz
+            *.sha256
