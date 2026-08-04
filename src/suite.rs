@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Deserialize;
 
 use crate::{
-    Mode, RunOptions, RunResult, SummaryLimits, execute_check, render_report, summarize_for_command,
+    ExecutionControl, Mode, RunOptions, RunResult, SummaryLimits, execute_check_controlled,
+    render_report, summarize_for_command, terminate_processes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub struct SuiteOptions {
     pub checks: Vec<String>,
     pub log_dir: String,
     pub limits: SummaryLimits,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,7 @@ pub struct SuiteStatus {
     pub command: Vec<String>,
     pub elapsed: Duration,
     pub result: Result<RunResult, String>,
+    pub canceled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +75,7 @@ pub struct SkippedCheck {
 #[derive(Debug, Clone)]
 pub struct SuiteSummary {
     pub statuses: Vec<SuiteStatus>,
+    pub exit_code: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,20 +172,15 @@ pub fn run_suite(options: SuiteOptions) -> Result<i32> {
     }
 
     let progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let summary =
-        execute_specs_with_progress(specs, options.log_dir, options.limits.clone(), progress)?;
+    let summary = execute_specs_with_progress(
+        specs,
+        options.log_dir,
+        options.limits.clone(),
+        progress,
+        options.verbose,
+    )?;
     render_suite_summary(&summary, &options.limits);
-    if summary.statuses.iter().any(|status| {
-        status
-            .result
-            .as_ref()
-            .map(|result| result.exit_code != 0)
-            .unwrap_or(true)
-    }) {
-        Ok(1)
-    } else {
-        Ok(0)
-    }
+    Ok(summary.exit_code)
 }
 
 pub fn list_checks() -> String {
@@ -335,7 +335,40 @@ pub fn execute_specs(
     log_dir: String,
     limits: SummaryLimits,
 ) -> Result<SuiteSummary> {
-    execute_specs_with_progress(specs, log_dir, limits, false)
+    execute_specs_with_progress(specs, log_dir, limits, false, false)
+}
+
+const NO_INITIATOR: usize = usize::MAX;
+const SIGNAL_INITIATOR: usize = usize::MAX - 1;
+
+#[cfg(unix)]
+fn signal_monitor(
+    cancellation: Arc<AtomicI32>,
+    initiator: Arc<AtomicUsize>,
+    live: Arc<Mutex<HashMap<usize, u32>>>,
+) -> Result<(signal_hook::iterator::Handle, thread::JoinHandle<()>)> {
+    use signal_hook::consts::signal::{SIGINT, SIGTERM};
+
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+    let handle = signals.handle();
+    let thread = thread::spawn(move || {
+        for signal in signals.forever() {
+            let exit_code = if signal == SIGINT { 130 } else { 143 };
+            if initiator
+                .compare_exchange(
+                    NO_INITIATOR,
+                    SIGNAL_INITIATOR,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                cancellation.store(exit_code, Ordering::Release);
+                terminate_processes(&live, None);
+            }
+        }
+    });
+    Ok((handle, thread))
 }
 
 fn execute_specs_with_progress(
@@ -343,24 +376,58 @@ fn execute_specs_with_progress(
     log_dir: String,
     limits: SummaryLimits,
     progress: bool,
+    verbose: bool,
 ) -> Result<SuiteSummary> {
     let log_dir_path = std::path::PathBuf::from(&log_dir);
+    let cancellation = Arc::new(AtomicI32::new(0));
+    let initiator = Arc::new(AtomicUsize::new(NO_INITIATOR));
+    let live = Arc::new(Mutex::new(HashMap::new()));
+    let output_lock = Arc::new(Mutex::new(()));
+    #[cfg(unix)]
+    let (signal_handle, signal_thread) = signal_monitor(
+        Arc::clone(&cancellation),
+        Arc::clone(&initiator),
+        Arc::clone(&live),
+    )?;
     let (sender, receiver) = mpsc::channel();
     let mut handles = Vec::new();
     for (index, spec) in specs.iter().cloned().enumerate() {
         let sender = sender.clone();
         let log_dir = log_dir.clone();
         let limits = limits.clone();
+        let cancellation = Arc::clone(&cancellation);
+        let initiator = Arc::clone(&initiator);
+        let live = Arc::clone(&live);
+        let output_lock = Arc::clone(&output_lock);
         handles.push(thread::spawn(move || {
             let started = Instant::now();
-            let result = execute_check(&RunOptions {
-                label: spec.label.clone(),
-                mode: spec.mode,
-                log_dir,
-                limits,
-                command: spec.command.clone(),
-            })
+            let result = execute_check_controlled(
+                &RunOptions {
+                    label: spec.label.clone(),
+                    mode: spec.mode,
+                    log_dir,
+                    limits,
+                    command: spec.command.clone(),
+                },
+                Some(&ExecutionControl {
+                    index,
+                    label: spec.label.clone(),
+                    cancellation: Arc::clone(&cancellation),
+                    live: Arc::clone(&live),
+                    verbose,
+                    output_lock,
+                }),
+            )
             .map_err(|error| format!("{error:#}"));
+            let exit_code = result.as_ref().map(|result| result.exit_code).unwrap_or(1);
+            if exit_code != 0
+                && initiator
+                    .compare_exchange(NO_INITIATOR, index, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                cancellation.store(exit_code, Ordering::Release);
+                terminate_processes(&live, Some(index));
+            }
             let _ = sender.send((index, spec, started.elapsed(), result));
         }));
     }
@@ -373,12 +440,15 @@ fn execute_specs_with_progress(
     while remaining > 0 {
         match receiver.recv_timeout(Duration::from_millis(90)) {
             Ok((index, spec, elapsed, result)) => {
+                let canceled = cancellation.load(Ordering::Acquire) != 0
+                    && initiator.load(Ordering::Acquire) != index;
                 statuses[index] = Some(SuiteStatus {
                     label: spec.label,
                     mode: spec.mode,
                     command: spec.command,
                     elapsed,
                     result,
+                    canceled,
                 });
                 if let Some(progress_bars) = &progress_bars {
                     finish_progress_bar(&progress_bars.bars[index]);
@@ -402,12 +472,22 @@ fn execute_specs_with_progress(
         let _ = progress_bars.multi.clear();
     }
 
+    let mut worker_panicked = false;
     for handle in handles {
-        if handle.join().is_err() {
-            bail!("suite worker thread panicked");
+        worker_panicked |= handle.join().is_err();
+    }
+    #[cfg(unix)]
+    {
+        signal_handle.close();
+        if signal_thread.join().is_err() {
+            bail!("signal monitor thread panicked");
         }
     }
+    if worker_panicked {
+        bail!("suite worker thread panicked");
+    }
 
+    let exit_code = cancellation.load(Ordering::Acquire);
     Ok(SuiteSummary {
         statuses: statuses
             .into_iter()
@@ -419,9 +499,12 @@ fn execute_specs_with_progress(
                     command: specs[index].command.clone(),
                     elapsed: started[index].elapsed(),
                     result: Err("suite worker did not return a result".to_string()),
+                    canceled: cancellation.load(Ordering::Acquire) != 0
+                        && initiator.load(Ordering::Acquire) != index,
                 })
             })
             .collect(),
+        exit_code,
     })
 }
 
@@ -508,6 +591,15 @@ fn strip_ansi(line: &str) -> String {
 fn render_suite_summary(summary: &SuiteSummary, limits: &SummaryLimits) {
     let color = std::io::IsTerminal::is_terminal(&std::io::stderr());
     for status in &summary.statuses {
+        if status.canceled {
+            eprintln!(
+                "{} {} ({})",
+                status_glyph("-", "33", color),
+                status.label,
+                elapsed_seconds(status.elapsed)
+            );
+            continue;
+        }
         match &status.result {
             Ok(result) if result.exit_code == 0 => {
                 eprintln!(
@@ -540,15 +632,19 @@ fn render_suite_summary(summary: &SuiteSummary, limits: &SummaryLimits) {
         .statuses
         .iter()
         .filter(|status| {
-            status
-                .result
-                .as_ref()
-                .map(|result| result.exit_code != 0)
-                .unwrap_or(true)
+            !status.canceled
+                && status
+                    .result
+                    .as_ref()
+                    .map(|result| result.exit_code != 0)
+                    .unwrap_or(true)
         })
         .count();
 
     for status in &summary.statuses {
+        if status.canceled {
+            continue;
+        }
         match &status.result {
             Ok(result) if result.exit_code != 0 => {
                 let parsed = summarize_for_command(status.mode, &status.command, &result.output);
@@ -612,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_specs_in_parallel_and_preserves_order() {
+    fn runs_specs_in_parallel_and_cancels_siblings() {
         let dir = tempdir().unwrap();
         let summary = execute_specs(
             vec![
@@ -628,7 +724,7 @@ mod tests {
                 RunSpec {
                     label: "fast".to_string(),
                     mode: Mode::Auto,
-                    command: vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()],
+                    command: vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()],
                 },
             ],
             dir.path().join("logs").display().to_string(),
@@ -638,8 +734,11 @@ mod tests {
 
         assert_eq!(summary.statuses[0].label, "slow");
         assert_eq!(summary.statuses[1].label, "fast");
-        assert_eq!(summary.statuses[0].result.as_ref().unwrap().exit_code, 0);
-        assert_eq!(summary.statuses[1].result.as_ref().unwrap().exit_code, 1);
+        assert_eq!(summary.statuses[0].result.as_ref().unwrap().exit_code, 143);
+        assert_eq!(summary.statuses[1].result.as_ref().unwrap().exit_code, 7);
+        assert!(summary.statuses[0].canceled);
+        assert!(!summary.statuses[1].canceled);
+        assert_eq!(summary.exit_code, 7);
     }
 
     #[test]

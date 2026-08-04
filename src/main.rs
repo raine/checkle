@@ -45,6 +45,9 @@ enum Action {
     Run {
         #[arg(value_name = "CHECK")]
         checks: Vec<String>,
+
+        #[arg(short, long)]
+        verbose: bool,
     },
     PreCommit {
         #[arg(value_name = "CHECK")]
@@ -63,10 +66,11 @@ fn main() -> Result<()> {
         max_fallback_lines: cli.tail,
     };
     let code = match cli.action {
-        Some(Action::Run { checks }) => checkle::run_suite(SuiteOptions {
+        Some(Action::Run { checks, verbose }) => checkle::run_suite(SuiteOptions {
             checks,
             log_dir: cli.log_dir,
             limits,
+            verbose,
         })?,
         Some(Action::PreCommit { checks }) => checkle::run_pre_commit(checkle::PreCommitOptions {
             checks,

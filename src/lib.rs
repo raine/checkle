@@ -3,12 +3,13 @@ mod git;
 mod precommit;
 mod suite;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::AtomicI32;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
@@ -234,6 +235,53 @@ pub struct RunResult {
     pub output: Vec<u8>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ExecutionControl {
+    pub index: usize,
+    pub label: String,
+    pub cancellation: Arc<AtomicI32>,
+    pub live: Arc<Mutex<HashMap<usize, u32>>>,
+    pub verbose: bool,
+    pub output_lock: Arc<Mutex<()>>,
+}
+
+struct LiveProcess {
+    index: usize,
+    live: Arc<Mutex<HashMap<usize, u32>>>,
+}
+
+impl Drop for LiveProcess {
+    fn drop(&mut self) {
+        self.live
+            .lock()
+            .expect("live process lock")
+            .remove(&self.index);
+    }
+}
+
+pub(crate) fn terminate_processes(live: &Mutex<HashMap<usize, u32>>, except: Option<usize>) {
+    let processes = live.lock().expect("live process lock").clone();
+    for (index, pid) in processes {
+        if Some(index) != except {
+            terminate_process(pid);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
 pub fn run(options: RunOptions) -> Result<i32> {
     if options.command.is_empty() {
         bail!("command is required");
@@ -252,6 +300,13 @@ pub fn run(options: RunOptions) -> Result<i32> {
 }
 
 pub fn execute_check(options: &RunOptions) -> Result<RunResult> {
+    execute_check_controlled(options, None)
+}
+
+pub(crate) fn execute_check_controlled(
+    options: &RunOptions,
+    control: Option<&ExecutionControl>,
+) -> Result<RunResult> {
     if options.command.is_empty() {
         bail!("command is required");
     }
@@ -263,7 +318,7 @@ pub fn execute_check(options: &RunOptions) -> Result<RunResult> {
         .with_context(|| format!("create log directory {}", log_dir.display()))?;
     let log_path = log_dir.join(format!("{}.log", safe_label(&options.label)));
 
-    let run_output = run_command(&options.command, &log_path)?;
+    let run_output = run_command(&options.command, &log_path, control)?;
     Ok(RunResult {
         exit_code: status_code(run_output.status),
         log_path,
@@ -300,13 +355,51 @@ enum StreamEvent {
     Stderr(Vec<u8>),
 }
 
-fn run_command(command: &[String], log_path: &Path) -> Result<RunOutput> {
-    let mut child = Command::new(&command[0])
+fn write_prefixed_output(control: &ExecutionControl, bytes: &[u8]) {
+    let _guard = control.output_lock.lock().expect("verbose output lock");
+    let mut stderr = std::io::stderr().lock();
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        let _ = writeln!(stderr, "{} | {line}", control.label);
+    }
+}
+
+fn run_command(
+    command: &[String],
+    log_path: &Path,
+    control: Option<&ExecutionControl>,
+) -> Result<RunOutput> {
+    let mut process = Command::new(&command[0]);
+    process
         .args(&command[1..])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+    let mut child = process
         .spawn()
         .with_context(|| format!("run {}", command[0]))?;
+    let _live_process = control.map(|control| {
+        control
+            .live
+            .lock()
+            .expect("live process lock")
+            .insert(control.index, child.id());
+        if control
+            .cancellation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != 0
+        {
+            terminate_process(child.id());
+        }
+        LiveProcess {
+            index: control.index,
+            live: Arc::clone(&control.live),
+        }
+    });
 
     let stdout = child.stdout.take().context("capture child stdout")?;
     let stderr = child.stderr.take().context("capture child stderr")?;
@@ -324,6 +417,9 @@ fn run_command(command: &[String], log_path: &Path) -> Result<RunOutput> {
         };
         write_stream_event(&mut log, label, &bytes)
             .with_context(|| format!("write log {}", log_path.display()))?;
+        if let Some(control) = control.filter(|control| control.verbose) {
+            write_prefixed_output(control, &bytes);
+        }
         output.extend_from_slice(&bytes);
     }
 
@@ -389,7 +485,17 @@ fn join_reader(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
 }
 
 fn status_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(1)
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
 }
 
 pub fn summarize(mode: Mode, bytes: &[u8]) -> Summary {

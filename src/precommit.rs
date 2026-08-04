@@ -44,6 +44,7 @@ pub fn run_pre_commit(options: PreCommitOptions) -> Result<i32> {
         checks,
         log_dir: options.log_dir,
         limits: options.limits,
+        verbose: false,
     });
     let restore_result = stash.restore();
     if let Err(error) = restore_result {

@@ -5,6 +5,99 @@ use assert_cmd::cargo::cargo_bin;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+fn write_suite_config(directory: &std::path::Path, checks: &str) {
+    std::fs::write(directory.join("checkle.toml"), checks).unwrap();
+}
+
+#[test]
+fn cli_run_preserves_failure_code_and_cancels_siblings() {
+    let dir = tempdir().unwrap();
+    write_suite_config(
+        dir.path(),
+        r#"
+[[check]]
+name = "slow"
+command = ["sh", "-c", "sleep 30"]
+
+[[check]]
+name = "fail"
+command = ["sh", "-c", "exit 7"]
+
+[[group]]
+name = "project"
+checks = ["slow", "fail"]
+"#,
+    );
+
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "project"])
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains("- slow"))
+        .stderr(predicate::str::contains("✖ fail").or(predicate::str::contains("x fail")));
+}
+
+#[test]
+fn cli_run_prefixes_verbose_output() {
+    let dir = tempdir().unwrap();
+    write_suite_config(
+        dir.path(),
+        r#"
+[[check]]
+name = "chatty"
+command = ["sh", "-c", "printf 'hello\\n'; printf 'error\\n' >&2"]
+"#,
+    );
+
+    Command::cargo_bin("checkle")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "--verbose", "chatty"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("chatty | hello"))
+        .stderr(predicate::str::contains("chatty | error"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_handles_sigterm() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempdir().unwrap();
+    write_suite_config(
+        dir.path(),
+        r#"
+[[check]]
+name = "slow"
+command = ["sh", "-c", "printf ready > ready; sleep 30"]
+"#,
+    );
+    let mut child = std::process::Command::new(cargo_bin("checkle"))
+        .current_dir(dir.path())
+        .args(["run", "slow"])
+        .spawn()
+        .unwrap();
+    for _ in 0..50 {
+        if dir.path().join("ready").exists() {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            let status = child.wait().unwrap();
+            assert_eq!(status.code(), Some(143));
+            assert_eq!(status.signal(), None);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("suite check did not start");
+}
+
 #[test]
 fn cli_writes_log_and_prints_compact_cargo_summary() {
     let dir = tempdir().unwrap();
